@@ -1,0 +1,17 @@
+samples:
+  Sample1:                                                                         # Change the name of your sample here
+    fastq_path_RNA:
+      /proj/user/data/Sample1/
+    barcodes:                                                                            # Define your different antibody barcodes here
+      RNA: AAAAGGGG        
+  Sample2:                         
+    fastq_path_RNA:
+      /proj/user/data/Sample2/  
+    barcodes:                                                                            # Define your different antibody barcodes here
+      RNA: AAAAGGGG
+ 
+general:                                               # Modify path to a tmp folder already created here                                     # Modify the path to cellranger binaries here
+  cellranger_software_RNA: /home/mattia/cellranger-9.0.1/bin/cellranger
+  cellranger_ref_RNA: /home/mattia/refdata-gex-GRCh38-2020-A/ # Modify the path to cellranger reference here
+
+

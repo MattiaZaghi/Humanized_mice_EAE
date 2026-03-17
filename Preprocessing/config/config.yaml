@@ -1,17 +1,62 @@
 samples:
-  Sample1:                                                                         # Change the name of your sample here
+  EAE_brain_1:                                                                         # Change the name of your sample here
     fastq_path_RNA:
-      /proj/user/data/Sample1/
+      /date/gcb/gcb_MZ/P38904/files/P38904/P38904_1001/02-FASTQ/20260220_LH00217_0329_B23GKMTLT3/
     barcodes:                                                                            # Define your different antibody barcodes here
       RNA: AAAAGGGG        
-  Sample2:                         
+  EAE_brain_2:                         
     fastq_path_RNA:
-      /proj/user/data/Sample2/  
+      /date/gcb/gcb_MZ/P38904/files/P38904/P38904_1002/02-FASTQ/20260220_LH00217_0329_B23GKMTLT3/ 
     barcodes:                                                                            # Define your different antibody barcodes here
       RNA: AAAAGGGG
- 
+  EAE_brain_3:                                                                         # Change the name of your sample here
+    fastq_path_RNA:
+      /date/gcb/gcb_MZ/P38904/files/P38904/P38904_1003/02-FASTQ/20260220_LH00217_0329_B23GKMTLT3/
+    barcodes:                                                                            # Define your different antibody barcodes here
+      RNA: AAAAGGGG        
+  CFA_brain_1:                         
+    fastq_path_RNA:
+      /date/gcb/gcb_MZ/P38904/files/P38904/P38904_1004/02-FASTQ/20260220_LH00217_0329_B23GKMTLT3/ 
+    barcodes:                                                                            # Define your different antibody barcodes here
+      RNA: AAAAGGGG
+  CFA_brain_2:                         
+    fastq_path_RNA:
+      /date/gcb/gcb_MZ/P38904/files/P38904/P38904_1005/02-FASTQ/20260220_LH00217_0329_B23GKMTLT3/  
+    barcodes:                                                                            # Define your different antibody barcodes here
+      RNA: AAAAGGGG
+  EAE_spleen_1:                                                                         # Change the name of your sample here
+    fastq_path_RNA:
+      /date/gcb/gcb_MZ/P38904/files/P38904/P38904_1006/02-FASTQ/20260220_LH00217_0329_B23GKMTLT3/
+    barcodes:                                                                            # Define your different antibody barcodes here
+      RNA: AAAAGGGG        
+  EAE_spleen_2:                         
+    fastq_path_RNA:
+      /date/gcb/gcb_MZ/P38904/files/P38904/P38904_1007/02-FASTQ/20260220_LH00217_0329_B23GKMTLT3/ 
+    barcodes:                                                                            # Define your different antibody barcodes here
+      RNA: AAAAGGGG
+  EAE_spleen_3:                                                                         # Change the name of your sample here
+    fastq_path_RNA:
+      /date/gcb/gcb_MZ/P38904/files/P38904/P38904_1008/02-FASTQ/20260220_LH00217_0329_B23GKMTLT3/
+    barcodes:                                                                            # Define your different antibody barcodes here
+      RNA: AAAAGGGG        
+  CFA_spleen_1:                         
+    fastq_path_RNA:
+      /date/gcb/gcb_MZ/P38904/files/P38904/P38904_1009/02-FASTQ/20260220_LH00217_0329_B23GKMTLT3/  
+    barcodes:                                                                            # Define your different antibody barcodes here
+      RNA: AAAAGGGG
+  CFA_spleen_2:                         
+    fastq_path_RNA:
+      /date/gcb/gcb_MZ/P38904/files/P38904/P38904_1010/02-FASTQ/20260220_LH00217_0329_B23GKMTLT3/  
+    barcodes:                                                                            # Define your different antibody barcodes here
+      RNA: AAAAGGGG
+
 general:                                               # Modify path to a tmp folder already created here                                     # Modify the path to cellranger binaries here
   cellranger_software_RNA: /home/mattia/cellranger-9.0.1/bin/cellranger
-  cellranger_ref_RNA: /home/mattia/refdata-gex-GRCh38-2020-A/ # Modify the path to cellranger reference here
+  cellranger_ref_RNA: /date/gcb/gcb_MZ/refdata-gex-GRCh38-and-mm10-2020-A/ # Modify the path to cellranger reference here
+  
+  # CellBender parameters
+  cellbender_fpr: 0.01  # False positive rate
+  cellbender_cuda: true  # Set to false if GPU not available
+  cellbender_epochs: 300  # Number of epochs for training
 
 

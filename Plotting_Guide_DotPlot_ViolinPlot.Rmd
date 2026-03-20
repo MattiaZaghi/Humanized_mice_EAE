@@ -1,0 +1,446 @@
+# Plotting Guide: DotPlots and ViolinPlots for Seurat Objects
+
+A beginner-friendly guide to creating publication-quality DotPlots and ViolinPlots using Seurat and ggplot2, matching the styling used in the main analysis vignette.
+
+---
+
+## Table of Contents
+1. [Setup & Required Libraries](#setup--required-libraries)
+2. [DotPlots: Marker Gene Expression](#dotplots-marker-gene-expression)
+3. [ViolinPlots: Gene Expression Distribution](#violinplots-gene-expression-distribution)
+4. [Styling & Customization](#styling--customization)
+5. [Tips & Troubleshooting](#tips--troubleshooting)
+
+---
+
+## Setup & Required Libraries
+
+Before starting, make sure you have loaded all necessary packages:
+
+```r
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(openxlsx)
+```
+
+### Loading a Seurat Object from an .rds File
+
+If you have a pre-processed Seurat object saved as an `.rds` file, load it using `readRDS()`:
+
+```r
+
+# Using file.path() for cleaner code (recommended)
+file_path <- file.path("/date/gcb/gcb_MZ/Humanized_mice_OD", "OL_SCT.rds")
+OL <- readRDS(file_path)
+
+# Or with relative path from your working directory
+OL <- readRDS("./data/OL_SCT.rds")
+```
+
+### Verify the Object Loaded Successfully
+
+```r
+# Check the object structure
+OL
+
+# View metadata (sample info, clusters, etc.)
+head(OL@meta.data)
+
+# Check cluster information
+table(OL$OL_clusters)
+
+# View available assays (RNA, SCT, etc.)
+Assays(OL)
+
+# Verify dimensions (cells x genes)
+dim(OL)
+```
+
+### Quick Helper Function to Load with Error Checking
+
+```r
+# Wrap loading in a function for better error handling
+load_seurat <- function(file_path) {
+  if (!file.exists(file_path)) {
+    stop("File not found: ", file_path)
+  }
+  cat("Loading", file_path, "...\n")
+  obj <- readRDS(file_path)
+  cat("✓ Successfully loaded!\n")
+  cat("Dimensions:", paste(dim(obj), collapse = " x "), "cells x genes\n")
+  cat("Clusters:", paste(unique(obj$OL_clusters), collapse = ", "), "\n")
+  return(obj)
+}
+
+# Use the helper function
+OL <- load_seurat("/date/gcb/gcb_MZ/Humanized_mice_OD/OL_SCT.rds")
+```
+
+### Generic Object Setup
+
+This guide uses **any Seurat object and any cluster type**. You can:
+- Load different cell type clusters: `Microglia <- readRDS("Microglia_SCT.rds")`, `Astrocytes <- readRDS("Astrocytes_SCT.rds")`, etc.
+- Reference any cluster column: `your_clusters`, `cell_type_clusters`, `broad_clustering`, etc.
+- The code below uses `seurat_obj` and `cluster_column` as placeholders — replace with your actual names
+
+**Examples:**
+- `OL` → Oligodendrocyte Seurat object; cluster column: `OL_clusters`
+- `Microglia` → Microglial Seurat object; cluster column: `Microglia_clusters`
+- `humanized_mouse_brain` → Whole brain object; cluster column: `broad_clustering`
+
+---
+
+## DotPlots: Marker Gene Expression
+
+### What is a DotPlot?
+
+A **DotPlot** shows:
+- **X-axis**: Gene markers
+- **Y-axis**: Clusters/Cell types
+- **Dot size**: Percentage of cells expressing the gene
+- **Dot color**: Average expression level
+
+### Basic DotPlot
+
+```r
+# Load your Seurat object and define marker genes
+seurat_obj <- readRDS("your_cell_type_SCT.rds")  # Replace with your object
+cluster_column <- "your_clusters"                  # Replace with your cluster column name
+
+# Define marker genes (with mm10 prefix, as used in the analysis)
+markers <- c(
+  # Your cell-type-specific markers
+  "mm10-Ugt8a", "mm10-Car2", "mm10-Cdh20", "mm10-Rtn4",
+  "mm10-Mbp", "mm10-Plp1", "mm10-Mag",
+  "mm10-Ifih1", "mm10-Irf7", "mm10-H2-Aa"
+)
+
+# Create basic DotPlot
+p1 <- DotPlot(seurat_obj, features = markers, group.by = cluster_column,
+              cols = c("lightgrey", "firebrick"))
+p1
+```
+
+**Example with OL data:**
+```r
+OL <- readRDS("OL_SCT.rds")
+p1 <- DotPlot(OL, features = markers, group.by = "OL_clusters",
+              cols = c("lightgrey", "firebrick"))
+```
+
+### Styled DotPlot (Publication Quality)
+
+```r
+p1 <- DotPlot(seurat_obj, features = markers, group.by = cluster_column,
+              cols = c("lightgrey", "firebrick")) +
+  xlab("") +
+  scale_x_discrete(labels = markers) +
+  theme(
+    # X-axis: gene names at 90 degree angle
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, 
+                               family = "Arial", size = 24, angle = 90),
+    # Y-axis: cluster names
+    axis.text.y = element_text(family = "Arial", size = 20),
+    # Axis titles
+    axis.title.y = element_text(family = "Arial", size = 24),
+    # Legend
+    legend.text = element_text(size = 20, family = "Arial"),
+    legend.title = element_text(size = 24, family = "Arial")
+  )
+
+# Display and save
+p1
+ggsave("DotPlot_Markers.png", p1, width = 14, height = 10, dpi = 300)
+```
+
+| Parameter | What it does | Example |
+|-----------|-------------|---------|
+| `features` | Which genes to plot | `c("mm10-Mbp", "mm10-Ugt8a")` |
+| `group.by` | Column to group by (any cluster column) | `"OL_clusters"`, `"Microglia_clusters"`, `"broad_clustering"` |
+| `cols` | Color gradient (low, high) | `c("lightgrey", "red")` |
+| `size = 5` | Size of dots (optional) | Larger values = bigger dots |
+
+**Finding your cluster column name:**
+```r
+# List all columns in metadata
+colnames(seurat_obj@meta.data)
+
+# Check what cluster columns are available
+head(seurat_obj@meta.data)
+```
+
+---
+
+## ViolinPlots: Gene Expression Distribution
+
+### What is a ViolinPlot?
+
+A **ViolinPlot** shows:
+- **X-axis**: Clusters/Cell types
+- **Y-axis**: Gene expression level
+- **Shape**: Distribution of expression (wider = more cells at that level)
+
+### Basic ViolinPlot
+
+```r
+# Plot expression of a single gene across clusters
+VlnPlot(seurat_obj, features = "mm10-Mbp", group.by = cluster_column, 
+        pt.size = 0.5)
+
+# Example with OL data:
+VlnPlot(OL, features = "mm10-Mbp", group.by = "OL_clusters", 
+        pt.size = 0.5)
+```
+
+### Styled ViolinPlot (Publication Quality)
+
+```r
+# Single gene with styling
+p1 <- VlnPlot(seurat_obj, features = "mm10-Mbp", group.by = cluster_column,
+              pt.size = 0.5, cols = my_colors) +
+  labs(x = "Cluster", y = "Expression Level", title = "Mbp Expression") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(hjust = 0.5, vjust = 0.5, 
+                               family = "Arial", size = 16),
+    axis.text.y = element_text(family = "Arial", size = 14),
+    axis.title.x = element_text(family = "Arial", size = 18, face = "bold"),
+    axis.title.y = element_text(family = "Arial", size = 18, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 20, face = "bold"),
+    legend.position = "none"
+  )
+
+p1
+ggsave("ViolinPlot_Mbp.png", p1, width = 8, height = 6, dpi = 300)
+```
+
+### Multiple Genes in One Plot (Faceted)
+
+```r
+# Plot multiple genes at once
+genes_to_plot <- c("mm10-Mbp", "mm10-Ugt8a", "mm10-Car2")
+
+p1 <- VlnPlot(seurat_obj, features = genes_to_plot, group.by = cluster_column,
+              pt.size = 0.5, cols = my_colors, ncol = 3) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(hjust = 0.5, vjust = 0.5, 
+                               family = "Arial", size = 12),
+    axis.text.y = element_text(family = "Arial", size = 12),
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold")
+  )
+
+p1
+```
+
+### Styled ViolinPlot with Points (ggplot2 approach)
+
+```r
+# Extract expression data for plotting
+expr_data <- FetchData(seurat_obj, vars = c("mm10-Mbp", cluster_column))
+colnames(expr_data) <- c("Expression", "Cluster")
+
+# Create custom violin plot
+p1 <- ggplot(expr_data, aes(x = Cluster, y = Expression, fill = Cluster)) +
+  geom_violin(alpha = 0.6) +
+  geom_jitter(shape = 16, size = 2, alpha = 0.4, width = 0.2) +
+  labs(title = "Mbp Expression Across Clusters",
+       x = "Cluster", y = "Expression Level") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(hjust = 0.5, vjust = 0.5, 
+                               family = "Arial", size = 16, angle = 45),
+    axis.text.y = element_text(family = "Arial", size = 14),
+    axis.title = element_text(family = "Arial", size = 18, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 20, face = "bold"),
+    legend.position = "none"
+  )
+
+p1
+ggsave("ViolinPlot_Custom.png", p1, width = 10, height = 6, dpi = 300)
+```
+
+---
+
+## Styling & Customization
+
+### Define a Color Palette (like in the vignette)
+
+```r
+# Define custom colors for clusters
+my_colors <- c(
+  "#1F77B4",  # Cluster 0 - blue
+  "#FF7F0E",  # Cluster 1 - orange
+  "#2CA02C",  # Cluster 2 - green
+  "#D62728",  # Cluster 3 - red
+  "#9467BD",  # Cluster 4 - purple
+  "#8C564B",  # Cluster 5 - brown
+  "#17BECF"   # Cluster 6 - cyan
+)
+
+# Use in DotPlot
+DotPlot(seurat_obj, features = markers, group.by = cluster_column, cols = c("lightgrey", "firebrick"))
+
+# Use in ViolinPlot
+VlnPlot(seurat_obj, features = "mm10-Mbp", group.by = cluster_column, cols = my_colors)
+```
+
+### Common Theme Elements to Customize
+
+```r
+# Full theme customization template
+theme(
+  # Text size and font for X-axis
+  axis.text.x = element_text(
+    hjust = 1, vjust = 0.5,           # Horizontal/vertical justification
+    family = "Arial",                  # Font family
+    size = 24,                         # Font size
+    angle = 90                         # Rotate 90 degrees
+  ),
+  
+  # Text for Y-axis
+  axis.text.y = element_text(family = "Arial", size = 20),
+  
+  # Axis titles
+  axis.title.x = element_text(family = "Arial", size = 20),
+  axis.title.y = element_text(family = "Arial", size = 20),
+  
+  # Plot title
+  plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+  
+  # Legend customization
+  legend.text = element_text(size = 16, family = "Arial"),
+  legend.title = element_text(size = 18, family = "Arial", face = "bold"),
+  legend.position = "right"            # "right", "left", "top", "bottom", "none"
+)
+```
+
+---
+
+## Tips & Troubleshooting
+
+### Q: Gene names have "mm10-" prefix but I want to remove it in the plot
+
+```r
+# Before: "mm10-Mbp"
+# After: "Mbp"
+
+# Method 1: Create a label vector
+marker_labels <- sub("^mm10-", "", markers)
+
+p1 <- DotPlot(OL, features = markers, group.by = "OL_clusters",
+              cols = c("lightgrey", "firebrick")) +
+  scale_x_discrete(labels = marker_labels)
+```
+
+### Q: How do I combine multiple plots side-by-side?
+
+```r
+library(patchwork)
+
+p1 <- VlnPlot(OL, features = "mm10-Mbp", group.by = "OL_clusters")
+p2 <- DotPlot(OL, features = c("mm10-Mbp", "mm10-Ugt8a"), group.by = "OL_clusters")
+
+# Combine plots
+combined <- p1 / p2  # Stack vertically
+combined <- p1 | p2  # Place side-by-side
+
+ggsave("Combined_Plot.png", combined, width = 14, height = 10, dpi = 300)
+```
+
+### Q: How do I change the plot size for export?
+
+```r
+# ggsave syntax: ggsave(filename, plot, width, height, dpi)
+ggsave("my_plot.png", p1, width = 10, height = 8, dpi = 300)
+
+# Common sizes:
+# width = 8, height = 6   → small single plot
+# width = 14, height = 10 → medium multi-gene plot
+# width = 20, height = 16 → large publication figure
+```
+
+### Q: How do I save multiple plots to an Excel file?
+
+```r
+library(openxlsx)
+
+# Create a workbook
+wb <- createWorkbook()
+
+# For DotPlots by cluster, you might extract and save data:
+dotplot_data <- seurat_obj@assays$SCT@data[markers, ] %>% as.data.frame()
+
+# Add to Excel
+addWorksheet(wb, "DotPlot_Data")
+writeData(wb, "DotPlot_Data", dotplot_data)
+
+# Save the workbook
+saveWorkbook(wb, "Plots_Summary.xlsx", overwrite = TRUE)
+```
+
+### Q: How do I filter genes for only significant ones?
+
+```r
+# Example: Only plot genes expressed in >10% of cells in at least one cluster
+markers_filtered <- markers[markers %in% rownames(seurat_obj)]  # Check gene exists
+
+p1 <- DotPlot(seurat_obj, features = markers_filtered, group.by = cluster_column)
+```
+
+---
+
+## Complete Workflow Example
+
+```r
+# 1. Load data - works for any cluster type
+seurat_obj <- readRDS("your_cell_type_SCT.rds")
+cluster_column <- "your_clusters"
+
+# 2. Define markers
+markers <- c("mm10-Mbp", "mm10-Ugt8a", "mm10-Car2", "mm10-Ifih1")
+
+# 3. Create DotPlot
+p_dot <- DotPlot(seurat_obj, features = markers, group.by = cluster_column,
+                 cols = c("lightgrey", "firebrick")) +
+  scale_x_discrete(labels = sub("^mm10-", "", markers)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5,
+                                   family = "Arial", size = 20),
+        axis.text.y = element_text(family = "Arial", size = 16),
+        legend.text = element_text(size = 14, family = "Arial"))
+
+# 4. Create ViolinPlot
+p_vln <- VlnPlot(seurat_obj, features = "mm10-Mbp", group.by = cluster_column,
+                 pt.size = 0.5) +
+  theme_minimal() +
+  theme(axis.text = element_text(family = "Arial", size = 14),
+        axis.title = element_text(family = "Arial", size = 16, face = "bold"))
+
+# 5. Combine and save
+combined <- p_dot / p_vln
+ggsave("Final_Plots.png", combined, width = 12, height = 10, dpi = 300)
+```
+
+**Quick swap to use OL data:**
+```r
+OL <- readRDS("OL_SCT.rds")
+seurat_obj <- OL
+cluster_column <- "OL_clusters"
+```
+
+---
+
+## Key Takeaways
+
+✓ **Works with any cluster type**: Replace `seurat_obj` and `cluster_column` with your own data  
+✓ **DotPlots**: Good for overview of multiple genes across clusters  
+✓ **ViolinPlots**: Good for showing expression distribution in detail  
+✓ **Find cluster columns**: Use `colnames(seurat_obj@meta.data)` to list available columns  
+✓ **Consistent styling**: Always use the same font/size for publication quality  
+✓ **Save high quality**: Use `dpi = 300` for publications  
+✓ **Remove prefixes**: Use `sub("^mm10-", "", x)` to clean gene names  
+✓ **Combine plots**: Use `patchwork` library with `|` or `/`  
+
+Good luck with your plotting! 🎨

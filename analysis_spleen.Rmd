@@ -1,7 +1,7 @@
 ---
-title: "Humanized mice EAE analysis Brain"
+title: "Humanized mice EAE analysis spleen"
 author: "Mattia Zaghi"
-date: "2026-03-06"
+date: "2026-03-23"
 output:
   word_document: default
   html_document: default
@@ -9,7 +9,7 @@ output:
 ---
 
 ## What is this vignette for?
-This Vignette contains all the necessary data analysis steps followed to analyzed the single cell RNA-seq of Mature humanized_mouse_braindendrocytes treated with FGF and Tomato controls including the code to generate the different figures.
+This Vignette contains all the necessary data analysis steps followed to analyzed the single cell RNA-seq of Mature humanized_mouse_spleendendrocytes treated with FGF and Tomato controls including the code to generate the different figures.
 
 
 ##1.Load packages, configure directories and create the Seurat object
@@ -43,12 +43,12 @@ library(hdf5r)
 library(patchwork)
 library(pals)
 require("knitr")
-
+library(harmony)
 
 library(DoubletFinder)
 opts_knit$set(root.dir = "/date/gcb/gcb_MZ/Humanized_mice_OD/")# change accordingly
 
-#source("/home/mattia/FGF_signaling_induces_disease-associated_humanized_mouse_braindendrocytes/functions.R")
+#source("/home/mattia/FGF_signaling_induces_disease-associated_humanized_mouse_spleendendrocytes/functions.R")
 ```
 
 ##1.2 Create the seurat object 
@@ -57,17 +57,18 @@ Let's start with loading the actual data. We will load separately all the brain 
 
 1.load all the seurat object corrected by cell bender 
 ```{r}
+options(future.globals.maxSize = 100e+09)
 
 # Base folder containing all samples
 base_dir <- "/date/gcb/gcb_MZ/Humanized_mice_OD"
 
-# Find all sample folders that contain "brain" in the name
-brain_samples <- list.dirs(base_dir, recursive = FALSE, full.names = FALSE)
-brain_samples <- brain_samples[grepl("brain", brain_samples)]
+# Find all sample folders that contain "spleen" in the name
+spleen_samples <- list.dirs(base_dir, recursive = FALSE, full.names = FALSE)
+spleen_samples <- spleen_samples[grepl("spleen", spleen_samples)]
 
 # Load each sample and create a Seurat object (with unique cell names)
 seurat_list <- list()
-for (sample in brain_samples) {
+for (sample in spleen_samples) {
   h5_path <- file.path(base_dir, sample, "RNA_AAAAGGGG", "cellbender_output_seurat.h5")
   if (!file.exists(h5_path)) {
     warning("Missing file: ", h5_path)
@@ -174,22 +175,25 @@ seurat_list <- lapply(names(seurat_list), function(s) {
 })
 names(seurat_list) <- names(seurat_list)
 
-humanized_mouse_brain <- Reduce(function(x, y) merge(x, y), seurat_list)
+humanized_mouse_spleen<- Reduce(function(x, y) merge(x, y), seurat_list)
 
 rm(seurat_list)
 #remove metadata from previous single sample doublet removal analysis
-humanized_mouse_brain@meta.data[["nCount_SCT"]]<-NULL
-humanized_mouse_brain@meta.data[["nFeature_SCT"]]<-NULL
-humanized_mouse_brain@meta.data[["SCT_snn_res.0.1"]]<-NULL
-humanized_mouse_brain@meta.data[["seurat_clusters"]]<-NULL
+humanized_mouse_spleen@meta.data[["nCount_SCT"]]<-NULL
+humanized_mouse_spleen@meta.data[["nFeature_SCT"]]<-NULL
+humanized_mouse_spleen@meta.data[["SCT_snn_res.0.1"]]<-NULL
+humanized_mouse_spleen@meta.data[["seurat_clusters"]]<-NULL
 obj@meta.data[["pANN_0.25_0.09_879"]]<-NULL
-humanized_mouse_brain@meta.data[["pANN_0.25_0.09_867"]]<-NULL
+humanized_mouse_spleen@meta.data[["pANN_0.25_0.09_867"]]<-NULL
 ```
 
 filter away cells that have a very high mitocondrial content 
 
 ```{r}
-humanized_mouse_brain <- subset(humanized_mouse_brain, subset = percent.mt < 5)
+humanized_mouse_spleen<- subset(humanized_mouse_spleen, subset = percent.mt < 5 & nCount_RNA < 10000 & nCount_RNA > 200 & nFeature_RNA < 10000)
+cells_keep <- WhichCells(humanized_mouse_spleen, expression = ratio_hs < 0.2 | ratio_hs > 0.8)
+humanized_mouse_spleen <- subset(humanized_mouse_spleen, cells = cells_keep)
+
 ```
 
 
@@ -202,24 +206,24 @@ In this sections quality controls based selection of good will be performed on t
 ```{r}
 # add the mitochondrial gene precentage 
 # mouse mito (mm10)
-humanized_mouse_brain[["percent.mt.mm10"]] <- PercentageFeatureSet(
-  humanized_mouse_brain,
+humanized_mouse_spleen[["percent.mt.mm10"]] <- PercentageFeatureSet(
+  humanized_mouse_spleen,
   pattern = "mt-"
 )
 
 # human mito (hg38)
-humanized_mouse_brain[["percent.mt.hg38"]] <- PercentageFeatureSet(
-  humanized_mouse_brain,
+humanized_mouse_spleen[["percent.mt.hg38"]] <- PercentageFeatureSet(
+  humanized_mouse_spleen,
   pattern = "MT-"
 )
-humanized_mouse_brain[["percent.mt"]]<-humanized_mouse_brain[["percent.mt.mm10"]]+humanized_mouse_brain[["percent.mt.hg38"]]
+humanized_mouse_spleen[["percent.mt"]]<-humanized_mouse_spleen[["percent.mt.mm10"]]+humanized_mouse_spleen[["percent.mt.hg38"]]
 ```
 
 check human vs mouse cells
 
 ```{r}
 # Assume this is your merged object
-obj <- humanized_mouse_brain
+obj <- humanized_mouse_spleen
 DefaultAssay(obj)<-"RNA"
 obj<-JoinLayers(obj)
 # Count UMIs per cell for each species (adjust prefixes as needed)
@@ -235,19 +239,20 @@ obj$species <- ifelse(human_umis > mouse_umis, "human", "mouse")
 
 # Optionally mark ambiguous/mixed cells (e.g., 20–80% human)
 ratio <- human_umis / (human_umis + mouse_umis)
+obj$ratio_hs<-ratio
 obj$species[ratio > 0.2 & ratio < 0.8] <- "mixed"
 
 # Write back
-humanized_mouse_brain <- obj
+humanized_mouse_spleen<- obj
 
 #how many cells per sample
-table(humanized_mouse_brain$orig.ident)
+table(humanized_mouse_spleen$orig.ident)
 
 #how many cell per species
-table(humanized_mouse_brain$species)
+table(humanized_mouse_spleen$species)
 
 #how many cell per replicate
-table(humanized_mouse_brain$sample)
+table(humanized_mouse_spleen$sample)
 
 ```
 
@@ -255,10 +260,11 @@ table(humanized_mouse_brain$sample)
 ```{r,fig.height=10, fig.width=10}
 # Visualize QC metrics as a violin plot
 
-QC_RNA <- data.frame(sample =  humanized_mouse_brain@meta.data[["sample"]],
-                     Genes = humanized_mouse_brain@meta.data[["nFeature_RNA"]],
-                     RNA = humanized_mouse_brain@meta.data[["nCount_RNA"]],
-                     Mt = humanized_mouse_brain@meta.data[["percent.mt"]])
+QC_RNA <- data.frame(sample =  humanized_mouse_spleen@meta.data[["sample"]],
+                     Genes = humanized_mouse_spleen@meta.data[["nFeature_RNA"]],
+                     RNA = humanized_mouse_spleen@meta.data[["nCount_RNA"]],
+                     Mt = humanized_mouse_spleen@meta.data[["percent.mt"]],
+                     humanization=humanized_mouse_spleen@meta.data[["ratio_hs"]])
 QC_RNA$sample <- as.factor(QC_RNA$sample)
 
 # Function to add mean and median annotations for each sample above the violin plots
@@ -370,18 +376,49 @@ Mt <- ggplot(QC_RNA) +
 
 Mt <- add_mean_median_annotation(Mt, QC_RNA, "sample", "Mt")
 
+# Plot for Mt
+humanization <- ggplot(QC_RNA) +
+  aes(x = sample, y =   humanization, fill = sample, color = sample) +
+  geom_violin(trim = TRUE, color = "#000000") +
+  geom_boxplot(width = 0.1, color = "#000000", fill = "#ffffff", outlier.shape = NA) +
+  scale_fill_manual(values = c(
+"#1f77b4",  # blue
+            "#ff7f0e",  # orange
+            "#2ca02c",  # green
+            "#d62728",  # red
+            "#9467bd"
+))+
+  scale_color_manual(values = c(
+"#1f77b4",  # blue
+            "#ff7f0e",  # orange
+            "#2ca02c",  # green
+            "#d62728",  # red
+            "#9467bd"
+))+
+  ggthemes::theme_base() +
+  xlab("") +
+  ylab("ratio of humanization") +
+  theme(panel.border = element_rect()) +
+  theme_classic() + theme(legend.position = "none") +
+  theme(axis.text.x = element_text(size = 18, family = "Arial", angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 18, family = "Arial"),
+        axis.title.y = element_text(size = 18, family = "Arial"),
+        axis.line = element_line(size = 1))
+
+humanization <- add_mean_median_annotation(humanization, QC_RNA, "sample", "humanization")
+
 Transcripts
 Genes
 Mt
-
+humanization
 ```
 
 let's also visualize how is the relationship between counts, genes and mito content
 
 ```{r}
 
-plot1 <- FeatureScatter(humanized_mouse_brain, feature1 = "nCount_RNA", feature2 = "percent.mt")
-plot2 <- FeatureScatter(humanized_mouse_brain, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 <- FeatureScatter(humanized_mouse_spleen, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(humanized_mouse_spleen, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
 plot1 + plot2
 ```
 
@@ -403,23 +440,23 @@ Despite in this experiment there are not multiple data batches and replicate we 
 ```{r}
 options(future.globals.maxSize = 100e+09)
 
-humanized_mouse_brain[["SCT"]]<-NULL
+humanized_mouse_spleen[["SCT"]]<-NULL
 
 # Log-normalized analysis on RNA
-humanized_mouse_brain <- NormalizeData(humanized_mouse_brain, assay = "RNA")
-humanized_mouse_brain <- FindVariableFeatures(humanized_mouse_brain, assay = "RNA")
-humanized_mouse_brain <- ScaleData(humanized_mouse_brain, assay = "RNA")
-humanized_mouse_brain <- RunPCA(humanized_mouse_brain, assay = "RNA", reduction.name = "pca_lognorm")
+humanized_mouse_spleen<- NormalizeData(humanized_mouse_spleen, assay = "RNA")
+humanized_mouse_spleen<- FindVariableFeatures(humanized_mouse_spleen, assay = "RNA")
+humanized_mouse_spleen<- ScaleData(humanized_mouse_spleen, assay = "RNA")
+humanized_mouse_spleen<- RunPCA(humanized_mouse_spleen, assay = "RNA", reduction.name = "pca_lognorm")
 
 # SCT analysis on SCT assay
-humanized_mouse_brain <- SCTransform(humanized_mouse_brain, verbose = TRUE)
-humanized_mouse_brain <- FindVariableFeatures(humanized_mouse_brain, assay = "SCT")
-humanized_mouse_brain <- RunPCA(humanized_mouse_brain, assay = "SCT", reduction.name = "pca_SCT")
+humanized_mouse_spleen<- SCTransform(humanized_mouse_spleen, verbose = TRUE)
+humanized_mouse_spleen<- FindVariableFeatures(humanized_mouse_spleen, assay = "SCT")
+humanized_mouse_spleen<- RunPCA(humanized_mouse_spleen, assay = "SCT", reduction.name = "pca_SCT")
 ```
 
 2.Having a look at the elbow plot to understand how many PCs are really informative, this value will be used in the subsequent analysis steps 
 ```{r}
-p1<-ElbowPlot(humanized_mouse_brain,reduction = "pca_SCT")
+p1<-ElbowPlot(humanized_mouse_spleen,reduction = "pca_SCT")
 p1
 ```
 After 15 SD the elbow plot becomes flat indicating that the majority of the information is explained by the first 15 dimension, this value will be used for the rest of the analysis.
@@ -427,12 +464,12 @@ After 15 SD the elbow plot becomes flat indicating that the majority of the info
 3.Clustering without data integration
 
 ```{r}
-humanized_mouse_brain <- FindNeighbors(humanized_mouse_brain, dims = 1:15, reduction = "pca_SCT")
-humanized_mouse_brain <- FindClusters(humanized_mouse_brain, resolution = 0.1, cluster.name = "unintegrated_clusters")
+humanized_mouse_spleen<- FindNeighbors(humanized_mouse_spleen, dims = 1:15, reduction = "pca_SCT")
+humanized_mouse_spleen<- FindClusters(humanized_mouse_spleen, resolution = 0.1, cluster.name = "unintegrated_clusters")
 ```
 4. Plot UMAP with samples and clustering
 ```{r,fig.height=10, fig.width=10}
-humanized_mouse_brain <- RunUMAP(humanized_mouse_brain, dims = 1:15, reduction = "pca_SCT", reduction.name = "umap.unintegrated")
+humanized_mouse_spleen<- RunUMAP(humanized_mouse_spleen, dims = 1:15, reduction = "pca_SCT", reduction.name = "umap.unintegrated")
 # visualize by batch and cell type annotation
 
 my_colors <- c(
@@ -442,7 +479,7 @@ my_colors <- c(
 )
 
 
-p1<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c("unintegrated_clusters"),cols = my_colors)+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p1<-DimPlot(humanized_mouse_spleen, reduction = "umap.unintegrated", group.by = c("unintegrated_clusters"),cols = my_colors)+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -460,7 +497,7 @@ p1<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c
     axis.text.y = element_blank()
   )
 
-p2<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c("orig.ident"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p2<-DimPlot(humanized_mouse_spleen, reduction = "umap.unintegrated", group.by = c("orig.ident"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -478,7 +515,7 @@ p2<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c
     axis.text.y = element_blank()
   )
 
-p3<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c("sample"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p3<-DimPlot(humanized_mouse_spleen, reduction = "umap.unintegrated", group.by = c("sample"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -496,24 +533,42 @@ p3<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c
     axis.text.y = element_blank()
   )
 
+p4<-DimPlot(humanized_mouse_spleen, reduction = "umap.unintegrated", group.by = c("species"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
 
 p1 
 p2
 p3
-saveRDS(humanized_mouse_brain,"/date/gcb/gcb_MZ/Humanized_mice_OD/humanized_mouse_brain_doublets.rds")
+p4
+#saveRDS(humanized_mouse_spleen,"/date/gcb/gcb_MZ/Humanized_mice_OD/humanized_mouse_spleen_doublets.rds")
 ```
 
 ```{r,fig.height=10, fig.width=20}
 colors_vector <- c(
-  "CFA_brain_1" = "#E41A1C", 
-  "CFA_brain_2" = "#377EB8", 
-  "EAE_brain_1" = "#984EA3", 
-  "EAE_brain_2" = "#FF7F00", 
-  "EAE_brain_3" = "#FFFF33"
+  "CFA_spleen_1" = "#E41A1C", 
+  "CFA_spleen_2" = "#377EB8", 
+  "EAE_spleen_1" = "#984EA3", 
+  "EAE_spleen_2" = "#FF7F00", 
+  "EAE_spleen_3" = "#FFFF33"
 )
 
 # Create the contingency table
-t <- table(Cluster=humanized_mouse_brain$unintegrated_clusters, Batch=humanized_mouse_brain@meta.data[["sample"]])
+t <- table(Cluster=humanized_mouse_spleen$unintegrated_clusters, Batch=humanized_mouse_spleen@meta.data[["sample"]])
 t <- t[, rev(names(colors_vector))]
 
 # Convert the table to a data frame
@@ -554,20 +609,19 @@ In this section the dimensionality reduction will be performed including data in
 
 ```{r}
 
-humanized_mouse_brain <- IntegrateLayers(
-  object = humanized_mouse_brain,
-  method = HarmonyIntegration,
-  orig.reduction = "pca_SCT", new.reduction = "harmony",
-  normalization.method = "SCT",
-  verbose = F
-)
-humanized_mouse_brain <- FindNeighbors(humanized_mouse_brain, dims = 1:15, reduction = "harmony")
-humanized_mouse_brain <- FindClusters(humanized_mouse_brain, resolution = 0.1,cluster.name = "harmony_clusters")
+humanized_mouse_spleen<- RunHarmony(humanized_mouse_spleen,
+                                    group.by.vars = "orig.ident",
+                                    reduction = "pca_SCT",
+                                    assay.use = "SCT",
+                                    reduction.save = "harmony",
+                                    verbose = TRUE)
+humanized_mouse_spleen<- FindNeighbors(humanized_mouse_spleen, dims = 1:15, reduction = "harmony")
+humanized_mouse_spleen<- FindClusters(humanized_mouse_spleen, resolution = 0.1,cluster.name = "harmony_clusters")
 ```
 
 2. Perform Dimensionality reduction
 ```{r}
-humanized_mouse_brain <- RunUMAP(humanized_mouse_brain, dims = 1:15, reduction = "harmony",reduction.name = "umap.harmony")
+humanized_mouse_spleen<- RunUMAP(humanized_mouse_spleen, dims = 1:15, reduction = "harmony",reduction.name = "umap.harmony")
 ```
 
 3.Plot UMAP with clusters and sample to check that the data integration effectively results in a better homogeneus dataset 
@@ -575,10 +629,10 @@ humanized_mouse_brain <- RunUMAP(humanized_mouse_brain, dims = 1:15, reduction =
 ```{r}
 
 
-pal13 <- pals::glasbey(13)         # 13 very distinct colors
+pal13 <- pals::glasbey(14)         # 13 very distinct colors
 pal13
 
-p1<-DimPlot(humanized_mouse_brain, reduction = "umap.harmony", group.by = c("harmony_clusters"), cols = pal13)+labs(x = "UMAP 1", y = "UMAP 2")+theme_minimal()+
+p1<-DimPlot(humanized_mouse_spleen, reduction = "umap.harmony", group.by = c("harmony_clusters"), cols = pal13)+labs(x = "UMAP 1", y = "UMAP 2")+theme_minimal()+
   theme(
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
@@ -589,7 +643,7 @@ p1<-DimPlot(humanized_mouse_brain, reduction = "umap.harmony", group.by = c("har
   )
 
 
-p2<-DimPlot(humanized_mouse_brain, reduction = "umap.harmony", group.by = c("sample"))+labs(x = "UMAP 1", y = "UMAP 2")+
+p2<-DimPlot(humanized_mouse_spleen, reduction = "umap.harmony", group.by = c("sample"))+labs(x = "UMAP 1", y = "UMAP 2")+
   ggtitle("") +  # Add your title here
  theme_minimal() +
   theme(
@@ -614,7 +668,7 @@ col<- c(
 )
 
 
-p3<-DimPlot(humanized_mouse_brain, reduction = "umap.SCT", group.by = c("species"), cols = col)+labs(x = "UMAP 1", y = "UMAP 2")+
+p3<-DimPlot(humanized_mouse_spleen, reduction = "umap.harmony", group.by = c("species"), cols = col)+labs(x = "UMAP 1", y = "UMAP 2")+
   ggtitle("") +  # Add your title here
  theme_minimal() +
   theme(
@@ -651,7 +705,7 @@ colors_vector <- c(
 )
 
 # Create the contingency table
-t <- table(Cluster=humanized_mouse_brain$harmony_clusters, Batch=humanized_mouse_brain@meta.data[["sample"]])
+t <- table(Cluster=humanized_mouse_spleen$harmony_clusters, Batch=humanized_mouse_spleen@meta.data[["sample"]])
 t <- t[, rev(names(colors_vector))]
 
 # Convert the table to a data frame
@@ -687,17 +741,17 @@ ggplot(df, aes(x = Cluster, y = Percent, fill = Batch)) +
 # find markers for every cluster compared to all remaining cells, report only the positive
 # ones
 
-DefaultAssay(humanized_mouse_brain)<-"SCT"
-humanized_mouse_brain <- PrepSCTFindMarkers(humanized_mouse_brain, assay = "SCT",verbose = T)
-humanized_mouse_brain_markers <- FindAllMarkers(humanized_mouse_brain, only.pos = TRUE)
+DefaultAssay(humanized_mouse_spleen)<-"SCT"
+humanized_mouse_spleen<- PrepSCTFindMarkers(humanized_mouse_spleen, assay = "SCT",verbose = T)
+humanized_mouse_spleen_markers <- FindAllMarkers(humanized_mouse_spleen, only.pos = TRUE)
 
 
  # Create a new workbook
 wb <- createWorkbook()
 
 # Loop through each cluster and add data to a new sheet
-for (cluster_value in unique(humanized_mouse_brain_markers$cluster)) {
-  cluster_data <- subset(humanized_mouse_brain_markers, cluster == cluster_value)
+for (cluster_value in unique(humanized_mouse_spleen_markers$cluster)) {
+  cluster_data <- subset(humanized_mouse_spleen_markers, cluster == cluster_value)
   sheet_name <- paste0("Cluster_", cluster_value)
   addWorksheet(wb, sheet_name)
   writeData(wb, sheet_name, cluster_data)
@@ -742,7 +796,7 @@ markers <- c(
 
 # 1) create a list of plots (one per gene)
 plots <- FeaturePlot(
-  humanized_mouse_brain,
+  humanized_mouse_spleen,
   features = markers,
   reduction = "umap.unintegrated",
   cols = c("lightgrey", "magenta"),
@@ -780,12 +834,12 @@ broad_clustering <- c("Cerebellar_Granule_Cells","Excitatory_Cortical_Neu","SST_
                       "Astrocytes","Medium_Spiny_Neu_Stria","Myelin_MOL","Cerebellar_Inhib_Interneu_Pvalb+",
                       "Microglia","Thal_Neu","OPcs","Purkinje_Cells")
 
-names(broad_clustering) <- levels(humanized_mouse_brain)
-humanized_mouse_brain <- RenameIdents(humanized_mouse_brain, broad_clustering)
-humanized_mouse_brain$broad_clustering <- Idents(humanized_mouse_brain) #create a new metadata colums with the broad clustering
+names(broad_clustering) <- levels(humanized_mouse_spleen)
+humanized_mouse_spleen<- RenameIdents(humanized_mouse_spleen, broad_clustering)
+humanized_mouse_spleen$broad_clustering <- Idents(humanized_mouse_spleen) #create a new metadata colums with the broad clustering
 
 # Check the new identities
-table(Idents(humanized_mouse_brain))
+table(Idents(humanized_mouse_spleen))
 
 my_colors <- c(
   "#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD",
@@ -793,7 +847,7 @@ my_colors <- c(
   "#aec7e8", "#ffbb78", "#98df8a"
 )
 
-p1<-DimPlot(humanized_mouse_brain, reduction = "umap.rpca_SCT",group.by = "orig.ident")+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p1<-DimPlot(humanized_mouse_spleen, reduction = "umap.rpca_SCT",group.by = "orig.ident")+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -813,7 +867,7 @@ p1<-DimPlot(humanized_mouse_brain, reduction = "umap.rpca_SCT",group.by = "orig.
 
 colors_3 <- c("red", "#56B4E9", "#009E73")  # select the colors you want for the UMAP
 
-p2<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated",group.by = "broad_clustering", cols = my_colors)+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p2<-DimPlot(humanized_mouse_spleen, reduction = "umap.unintegrated",group.by = "broad_clustering", cols = my_colors)+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -869,7 +923,7 @@ markers <- c(
   "mm10-Car8", "mm10-Pcp2", "mm10-Ppp1r17", "mm10-Col18a1", "mm10-Atp2a3"
 )
 
-p1<-DotPlot(humanized_mouse_brain, features = markers,group.by = "broad_clustering",cols = c("lightgrey", "firebrick"))+
+p1<-DotPlot(humanized_mouse_spleen, features = markers,group.by = "broad_clustering",cols = c("lightgrey", "firebrick"))+
   xlab("")+
   scale_x_discrete(labels = markers) + 
   theme(
@@ -896,7 +950,7 @@ With this line of code we will create a new Seurat object that will contain only
 
 
 
-OL <- subset(humanized_mouse_brain, idents = c("Myelin_MOL","MOL","OPcs"))            
+OL <- subset(humanized_mouse_spleen, idents = c("Myelin_MOL","MOL","OPcs"))            
 
 
 ```
@@ -1440,7 +1494,7 @@ With this line of code we will create a new Seurat object that will contain only
 ```{r}
 
 
-Microglia <- subset(humanized_mouse_brain, idents = c("Microglia"))            
+Microglia <- subset(humanized_mouse_spleen, idents = c("Microglia"))            
 
 
 ```
@@ -1744,7 +1798,7 @@ p1
 
 ```{r}
 # 1) cluster set
-broad_clusters <- unique(humanized_mouse_brain$broad_clustering)
+broad_clusters <- unique(humanized_mouse_spleen$broad_clustering)
 
 # storage
 clusters_objects <- list()
@@ -1755,7 +1809,7 @@ for (bc in broad_clusters) {
   message("Processing broad cluster: ", bc, " --> ", obj_name)
 
   # subset
-  OL <- subset(humanized_mouse_brain, subset = broad_clustering == bc)
+  OL <- subset(humanized_mouse_spleen, subset = broad_clustering == bc)
 
   # prep
   DefaultAssay(OL) <- "RNA"
@@ -2092,7 +2146,7 @@ Save objects
 ```{r}
 saveRDS(Microglia,"/date/gcb/gcb_MZ/Humanized_mice_OD/Results/objects/Microglia_SCT.rds")
 saveRDS(OL,"/date/gcb/gcb_MZ/Humanized_mice_OD/Results/objects/Oligodendroglia_SCT.rds")
-saveRDS(humanized_mouse_brain,"/date/gcb/gcb_MZ/Humanized_mice_OD/Results/objects/humanized_mouse_brain_whole_doublets.rds")
+saveRDS(humanized_mouse_spleen,"/date/gcb/gcb_MZ/Humanized_mice_OD/Results/objects/humanized_mouse_spleen_whole_doublets.rds")
 ```
 
 

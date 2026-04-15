@@ -2351,7 +2351,10 @@ for (cluster_name in names(ego_dge_list)) {
     go_results <- as.data.frame(ego_dge_list[[cluster_name]])
 
     # Create sheet name (Excel has 31 char limit for sheet names)
-    sheet_name <- substr(cluster_name, 1, 31)
+    # Preserve the direction suffix (_EAE_up / _CFA_up) when truncating
+    suffix <- ifelse(grepl("_EAE_up$", cluster_name), "_EAE_up", "_CFA_up")
+    prefix <- sub("_(EAE|CFA)_up$", "", cluster_name)
+    sheet_name <- paste0(substr(prefix, 1, 31 - nchar(suffix)), suffix)
 
     # Add worksheet
     addWorksheet(wb, sheet_name)
@@ -2457,8 +2460,11 @@ for (cluster_name in names(ekegg_dge_list)) {
     # Add mLog10Padj column
     kegg_results$mLog10Padj <- -log10(kegg_results$p.adjust)
 
-    # Create sheet name
-    sheet_name <- substr(cluster_name, 1, 31)
+    # Create sheet name (Excel has 31 char limit for sheet names)
+    # Preserve the direction suffix (_EAE_up / _CFA_up) when truncating
+    suffix <- ifelse(grepl("_EAE_up$", cluster_name), "_EAE_up", "_CFA_up")
+    prefix <- sub("_(EAE|CFA)_up$", "", cluster_name)
+    sheet_name <- paste0(substr(prefix, 1, 31 - nchar(suffix)), suffix)
 
     # Add worksheet and write data
     addWorksheet(wb_kegg, sheet_name)

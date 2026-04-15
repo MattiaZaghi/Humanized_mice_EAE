@@ -2230,17 +2230,17 @@ plot_volcano <- function(res_df, cluster_label,
 ##5.3 DGE within each harmony cluster (whole-brain object)
 
 ```{r}
-harmony_cluster_ids <- levels(humanized_mouse_brain$harmony_clusters)
+broad_clustering_ids <- levels(humanized_mouse_brain$broad_clustering)
 
-dge_brain_list <- lapply(harmony_cluster_ids, function(cl) {
+dge_brain_list <- lapply(broad_clustering_ids, function(cl) {
   message("Running DGE for harmony cluster: ", cl)
   run_pseudobulk_dge(
     seurat_obj  = humanized_mouse_brain,
-    cluster_col = "harmony_clusters",
+    cluster_col = "broad_clustering",
     cluster_id  = cl
   )
 })
-names(dge_brain_list) <- harmony_cluster_ids
+names(dge_brain_list) <- broad_clustering_ids
 
 # Combine into one data.frame
 dge_brain_all <- do.call(rbind, Filter(Negate(is.null), dge_brain_list))
@@ -2265,7 +2265,7 @@ Volcano plots – whole-brain harmony clusters
 ```{r, fig.height=6, fig.width=8}
 for (cl in names(dge_brain_list)) {
   if (!is.null(dge_brain_list[[cl]]) && sum(!is.na(dge_brain_list[[cl]]$padj)) > 0) {
-    print(plot_volcano(dge_brain_list[[cl]], paste("Harmony cluster", cl)))
+    print(plot_volcano(dge_brain_list[[cl]], paste("broad_clustering", cl)))
   }
 }
 ```
@@ -2295,6 +2295,191 @@ writeData(wb_summary, "DGE_summary", dge_summary)
 saveWorkbook(wb_summary,
              "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/DGE_EAE_vs_CFA_summary.xlsx",
              overwrite = TRUE)
+```
+
+##5.5 Functional enrichment of DEGs – GO biological process
+
+Enrichment is run separately on genes up in EAE and genes up in CFA (padj < 0.05,
+|log2FC| > 0.5) within each harmony cluster, mirroring the approach used for
+cluster markers above.
+
+1. Compute GO enrichment per cluster and direction
+
+```{r}
+# Build named gene lists: one entry per cluster x direction
+dge_gene_lists <- list()
+for (cl in names(dge_brain_list)) {
+  df <- dge_brain_list[[cl]]
+  if (is.null(df)) next
+  df <- df[!is.na(df$padj), ]
+  up_eae <- df$gene[df$padj < 0.05 & df$log2FoldChange >  0.5]
+  up_cfa <- df$gene[df$padj < 0.05 & df$log2FoldChange < -0.5]
+  if (length(up_eae) > 0) dge_gene_lists[[paste0("Cluster_", cl, "_EAE_up")]] <- up_eae
+  if (length(up_cfa) > 0) dge_gene_lists[[paste0("Cluster_", cl, "_CFA_up")]] <- up_cfa
+}
+
+# Strip mm10- prefix and convert to ENTREZ IDs
+all_dge_genes_clean <- sub("^mm10-", "", unique(unlist(dge_gene_lists)))
+gene_map_dge <- bitr(all_dge_genes_clean, fromType = "SYMBOL", toType = "ENTREZID",
+                     OrgDb = org.Mm.eg.db)
+sym2ent_dge <- setNames(gene_map_dge$ENTREZID, gene_map_dge$SYMBOL)
+
+entrez_dge_lists <- lapply(dge_gene_lists, function(x) {
+  na.omit(unname(sym2ent_dge[sub("^mm10-", "", x)]))
+})
+
+# GO enrichment
+ego_dge_list <- lapply(names(entrez_dge_lists), function(nm) {
+  enrichGO(gene          = entrez_dge_lists[[nm]],
+           OrgDb         = org.Mm.eg.db,
+           keyType       = "ENTREZID",
+           ont           = "BP",
+           pAdjustMethod = "BH",
+           pvalueCutoff  = 0.05,
+           qvalueCutoff  = 0.2,
+           readable      = TRUE)
+})
+names(ego_dge_list) <- names(entrez_dge_lists)
+```
+
+2. Save GO results to Excel (one sheet per cluster x direction)
+
+```{r}
+wb_go_dge <- createWorkbook()
+
+for (nm in names(ego_dge_list)) {
+  if (!is.null(ego_dge_list[[nm]]) && nrow(ego_dge_list[[nm]]@result) > 0) {
+    go_results <- as.data.frame(ego_dge_list[[nm]])
+    sheet_name <- substr(nm, 1, 31)
+    addWorksheet(wb_go_dge, sheet_name)
+    writeData(wb_go_dge, sheet_name, go_results)
+    cat(sprintf("Added sheet: %s (%d GO terms)\n", nm, nrow(go_results)))
+  } else {
+    cat(sprintf("No significant GO terms for: %s\n", nm))
+  }
+}
+
+saveWorkbook(wb_go_dge,
+             "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/DGE_EAE_vs_CFA_GO_enrichment.xlsx",
+             overwrite = TRUE)
+cat("\n✓ GO enrichment results saved to Excel file!\n")
+```
+
+3. Plot GO enrichment results
+
+```{r, fig.height=20, fig.width=40}
+ego_dge_df <- map2_df(names(ego_dge_list), ego_dge_list, ~{
+  if (is.null(.y) || nrow(as.data.frame(.y)) == 0) return(NULL)
+  df <- as.data.frame(.y)
+  df$group <- .x
+  df$mLog10Padj <- -log10(df$p.adjust)
+  df
+})
+
+plot_df_go_dge <- ego_dge_df %>%
+  group_by(group) %>%
+  slice_max(order_by = mLog10Padj, n = 10, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(Description = fct_reorder(Description, mLog10Padj))
+
+p1 <- ggplot(plot_df_go_dge, aes(x = group, y = Description, size = Count, color = mLog10Padj)) +
+  geom_point() +
+  scale_color_gradient(low = "gold", high = "red") +
+  labs(title = "GO BP enrichment – DEGs (EAE vs CFA)",
+       x = "Cluster / Direction", y = "Term", color = "-log10(FDR)") +
+  theme_bw(base_size = 12) + theme_classic() +
+  theme(
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 45),
+    axis.text.y = element_text(family = "Arial", size = 24),
+    axis.title.y = element_text(family = "Arial", size = 28, face = "bold"),
+    axis.title.x = element_text(family = "Arial", size = 28, face = "bold"),
+    legend.text = element_text(size = 24, family = "Arial"),
+    legend.title = element_text(size = 32, family = "Arial", face = "bold")
+  )
+plots <- list(DGE_GO_enrichment = p1)
+for (nm in names(plots)) {
+  ggplot2::ggsave(file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/",
+                             paste0(nm, ".png")),
+                  plots[[nm]], width = 24, height = 26, dpi = 300)
+}
+p1
+```
+
+##5.6 Functional enrichment of DEGs – KEGG pathways
+
+1. Compute KEGG enrichment per cluster and direction
+
+```{r}
+ekegg_dge_list <- lapply(names(entrez_dge_lists), function(nm) {
+  enrichKEGG(gene         = entrez_dge_lists[[nm]],
+             organism     = "mmu",
+             pvalueCutoff = 0.05)
+})
+names(ekegg_dge_list) <- names(entrez_dge_lists)
+
+kegg_dge_df <- map2_df(names(ekegg_dge_list), ekegg_dge_list, ~{
+  if (is.null(.y) || nrow(as.data.frame(.y)) == 0) return(NULL)
+  df <- as.data.frame(.y)
+  df$group <- .x
+  df$mLog10Padj <- -log10(df$p.adjust)
+  df
+})
+```
+
+2. Save KEGG results to Excel
+
+```{r}
+wb_kegg_dge <- createWorkbook()
+
+for (nm in names(ekegg_dge_list)) {
+  if (!is.null(ekegg_dge_list[[nm]]) && nrow(ekegg_dge_list[[nm]]@result) > 0) {
+    kegg_results <- as.data.frame(ekegg_dge_list[[nm]])
+    kegg_results$mLog10Padj <- -log10(kegg_results$p.adjust)
+    sheet_name <- substr(nm, 1, 31)
+    addWorksheet(wb_kegg_dge, sheet_name)
+    writeData(wb_kegg_dge, sheet_name, kegg_results)
+    cat(sprintf("Added sheet: %s (%d KEGG pathways)\n", nm, nrow(kegg_results)))
+  } else {
+    cat(sprintf("No significant KEGG pathways for: %s\n", nm))
+  }
+}
+
+saveWorkbook(wb_kegg_dge,
+             "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/DGE_EAE_vs_CFA_KEGG_enrichment.xlsx",
+             overwrite = TRUE)
+cat("\n✓ KEGG enrichment results saved to Excel file!\n")
+```
+
+3. Plot KEGG enrichment results
+
+```{r, fig.height=20, fig.width=40}
+plot_df_kegg_dge <- kegg_dge_df %>%
+  group_by(group) %>%
+  slice_max(order_by = mLog10Padj, n = 10, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(Description = fct_reorder(Description, mLog10Padj))
+
+p1 <- ggplot(plot_df_kegg_dge, aes(x = group, y = Description, size = Count, color = mLog10Padj)) +
+  geom_point() +
+  scale_color_gradient(low = "gold", high = "red") +
+  labs(title = "KEGG enrichment – DEGs (EAE vs CFA)",
+       x = "Cluster / Direction", y = "Pathway", color = "-log10(FDR)") +
+  theme_bw(base_size = 12) + theme_classic() +
+  theme(
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 45),
+    axis.text.y = element_text(family = "Arial", size = 24),
+    axis.title.y = element_text(family = "Arial", size = 28, face = "bold"),
+    axis.title.x = element_text(family = "Arial", size = 28, face = "bold"),
+    legend.text = element_text(size = 24, family = "Arial"),
+    legend.title = element_text(size = 32, family = "Arial", face = "bold")
+  )
+plots <- list(DGE_KEGG_enrichment = p1)
+for (nm in names(plots)) {
+  ggplot2::ggsave(file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/",
+                             paste0(nm, ".png")),
+                  plots[[nm]], width = 24, height = 26, dpi = 300)
+}
+p1
 ```
 
 

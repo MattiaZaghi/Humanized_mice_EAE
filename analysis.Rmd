@@ -2379,9 +2379,9 @@ cat("\n✓ GO enrichment results saved to Excel file!\n")
 
 ```
 
-3.Plot the functional enrichment results for GO terms
+3.Plot the functional enrichment results for GO terms – one plot per cluster
 
-```{r,fig.height=20, fig.width=40}
+```{r,fig.height=20, fig.width=20}
 # Collect GO BP results into one data.frame
 
 ego_dge_df <- map2_df(names(ego_dge_list), ego_dge_list, ~{
@@ -2392,32 +2392,38 @@ ego_dge_df <- map2_df(names(ego_dge_list), ego_dge_list, ~{
   df
 })
 
-# Choose top terms per cluster and plot
+# One plot per harmony cluster (combining EAE_up and CFA_up directions)
+cluster_ids <- unique(sub("_(EAE|CFA)_up$", "", ego_dge_df$cluster))
 
-plot_df <- ego_dge_df %>%
-  group_by(cluster) %>%
-  slice_max(order_by = mLog10Padj, n = 10, with_ties = FALSE) %>%
-  ungroup() %>%
-  mutate(Description = fct_reorder(Description, mLog10Padj))
+for (cl in cluster_ids) {
 
-p1 <- ggplot(plot_df, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
-  geom_point() +
-  scale_color_gradient(low = "gold", high = "red") +
-  labs(title = "GO BP enrichment per cluster", x = "Cluster", y = "Term", color = "-log10(FDR)") +
-  theme_bw(base_size = 12) + theme_classic()+
-  theme(
-    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 45),
-    axis.text.y = element_text(family = "Arial", size = 24),
-    axis.title.y = element_text(family = "Arial", size =28, face = "bold"),
-    axis.title.x = element_text(family = "Arial", size =28, face = "bold"),
-    legend.text = element_text(size = 24, family = "Arial"),
-    legend.title = element_text(size = 32, family = "Arial", face = "bold")
-  )
-plots <- list(Func_enrich_GO_DGE=p1)
-for (nm in names(plots)) {
-ggplot2::ggsave(file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/", paste0(nm, ".png")), plots[[nm]], width =24, height = 26, dpi = 300)
+  plot_df <- ego_dge_df %>%
+    filter(grepl(paste0("^", cl, "_(EAE|CFA)_up$"), cluster)) %>%
+    group_by(cluster) %>%
+    slice_max(order_by = mLog10Padj, n = 10, with_ties = FALSE) %>%
+    ungroup() %>%
+    mutate(Description = fct_reorder(Description, mLog10Padj))
+
+  if (nrow(plot_df) == 0) next
+
+  p1 <- ggplot(plot_df, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
+    geom_point() +
+    scale_color_gradient(low = "gold", high = "red") +
+    labs(title = paste("GO BP enrichment –", cl), x = "Direction", y = "Term", color = "-log10(FDR)") +
+    theme_bw(base_size = 12) + theme_classic()+
+    theme(
+      axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 45),
+      axis.text.y = element_text(family = "Arial", size = 24),
+      axis.title.y = element_text(family = "Arial", size =28, face = "bold"),
+      axis.title.x = element_text(family = "Arial", size =28, face = "bold"),
+      legend.text = element_text(size = 24, family = "Arial"),
+      legend.title = element_text(size = 32, family = "Arial", face = "bold")
+    )
+  ggplot2::ggsave(file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/",
+                             paste0("Func_enrich_GO_DGE_", cl, ".png")),
+                  p1, width = 14, height = 16, dpi = 300)
+  print(p1)
 }
-p1
 
 ```
 
@@ -2487,33 +2493,40 @@ cat("\n✓ KEGG enrichment results saved (one sheet per cluster)!\n")
 
 ```
 
-3.Plot the results
+3.Plot the results – one plot per cluster
 
-```{r,fig.height=20, fig.width=40}
-plot_df_kegg <- kegg_dge_df %>%
-  group_by(cluster) %>%
-  slice_max(order_by = mLog10Padj, n = 10, with_ties = FALSE) %>%
-  ungroup() %>%
-  mutate(Description = fct_reorder(Description, mLog10Padj))
+```{r,fig.height=20, fig.width=20}
+cluster_ids_kegg <- unique(sub("_(EAE|CFA)_up$", "", kegg_dge_df$cluster))
 
-p1 <- ggplot(plot_df_kegg, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
-  geom_point() +
-  scale_color_gradient(low = "gold", high = "red") +
-  labs(title = "KEGG enrichment per cluster", x = "Cluster", y = "Pathway", color = "-log10(FDR)") +
-  theme_bw(base_size = 12)+theme_classic()+
-  theme(
-    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 45),
-    axis.text.y = element_text(family = "Arial", size = 24),
-    axis.title.y = element_text(family = "Arial", size =28, face = "bold"),
-    axis.title.x = element_text(family = "Arial", size =28, face = "bold"),
-    legend.text = element_text(size = 24, family = "Arial"),
-    legend.title = element_text(size = 32, family = "Arial", face = "bold")
-  )
-plots <- list(Func_enrich_KEGG_DGE=p1)
-for (nm in names(plots)) {
-ggplot2::ggsave(file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/", paste0(nm, ".png")), plots[[nm]], width =24, height = 26, dpi = 300)
+for (cl in cluster_ids_kegg) {
+
+  plot_df_kegg <- kegg_dge_df %>%
+    filter(grepl(paste0("^", cl, "_(EAE|CFA)_up$"), cluster)) %>%
+    group_by(cluster) %>%
+    slice_max(order_by = mLog10Padj, n = 10, with_ties = FALSE) %>%
+    ungroup() %>%
+    mutate(Description = fct_reorder(Description, mLog10Padj))
+
+  if (nrow(plot_df_kegg) == 0) next
+
+  p1 <- ggplot(plot_df_kegg, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
+    geom_point() +
+    scale_color_gradient(low = "gold", high = "red") +
+    labs(title = paste("KEGG enrichment –", cl), x = "Direction", y = "Pathway", color = "-log10(FDR)") +
+    theme_bw(base_size = 12)+theme_classic()+
+    theme(
+      axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 45),
+      axis.text.y = element_text(family = "Arial", size = 24),
+      axis.title.y = element_text(family = "Arial", size =28, face = "bold"),
+      axis.title.x = element_text(family = "Arial", size =28, face = "bold"),
+      legend.text = element_text(size = 24, family = "Arial"),
+      legend.title = element_text(size = 32, family = "Arial", face = "bold")
+    )
+  ggplot2::ggsave(file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/",
+                             paste0("Func_enrich_KEGG_DGE_", cl, ".png")),
+                  p1, width = 14, height = 16, dpi = 300)
+  print(p1)
 }
-p1
 
 ```
 

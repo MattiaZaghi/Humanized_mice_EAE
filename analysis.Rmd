@@ -25,14 +25,12 @@ library(Seurat)
 library(future)
 library(tidyverse)
 library(dplyr)
-library(tidyverse)
 library(ggthemes)
 library(scales)
 library(cowplot)
 library(RColorBrewer)
 library(openxlsx)
 library(homologene)
-library(openxlsx)
 library(clusterProfiler)
 library(org.Mm.eg.db)
 library(org.Hs.eg.db)
@@ -42,9 +40,7 @@ library(readxl)
 library(hdf5r)
 library(patchwork)
 library(pals)
-require("knitr")
-
-
+library(knitr)
 library(DoubletFinder)
 opts_knit$set(root.dir = "/date/gcb/gcb_MZ/Humanized_mice_OD/")# change accordingly
 
@@ -104,7 +100,7 @@ seurat_obj[["percent.mt.hg38"]] <- PercentageFeatureSet(
   seurat_obj,
   pattern = "MT-"
 )
-seurat_obj[["percent.mt"]]<-seurat_obj[["percent.mt.mm10"]]+seurat_obj[["percent.mt.hg38"]]
+seurat_obj[["percent.mt"]] <- seurat_obj[["percent.mt.mm10"]] + seurat_obj[["percent.mt.hg38"]]
 
   seurat_obj <- subset(seurat_obj, subset = percent.mt < 5)
 
@@ -145,7 +141,7 @@ seurat_obj[["percent.mt"]]<-seurat_obj[["percent.mt.mm10"]]+seurat_obj[["percent
 
   # Recompute UMAP after doublet removal (SCT after singlet filtering)
   # Remove the old SCT assay 
-  DefaultAssay(seurat_obj)<-"RNA"
+  DefaultAssay(seurat_obj) <- "RNA"
   seurat_obj[["SCT"]] <- NULL
   seurat_obj <- SCTransform(seurat_obj, verbose = TRUE)
   seurat_obj <- RunPCA(seurat_obj, verbose = TRUE)
@@ -172,18 +168,17 @@ seurat_list <- lapply(names(seurat_list), function(s) {
   obj$sample <- s
   obj
 })
-names(seurat_list) <- names(seurat_list)
 
 humanized_mouse_brain <- Reduce(function(x, y) merge(x, y), seurat_list)
 
 rm(seurat_list)
-#remove metadata from previous single sample doublet removal analysis
-humanized_mouse_brain@meta.data[["nCount_SCT"]]<-NULL
-humanized_mouse_brain@meta.data[["nFeature_SCT"]]<-NULL
-humanized_mouse_brain@meta.data[["SCT_snn_res.0.1"]]<-NULL
-humanized_mouse_brain@meta.data[["seurat_clusters"]]<-NULL
-obj@meta.data[["pANN_0.25_0.09_879"]]<-NULL
-humanized_mouse_brain@meta.data[["pANN_0.25_0.09_867"]]<-NULL
+# Remove metadata from previous single-sample doublet removal analysis
+humanized_mouse_brain@meta.data[["nCount_SCT"]]      <- NULL
+humanized_mouse_brain@meta.data[["nFeature_SCT"]]    <- NULL
+humanized_mouse_brain@meta.data[["SCT_snn_res.0.1"]] <- NULL
+humanized_mouse_brain@meta.data[["seurat_clusters"]] <- NULL
+humanized_mouse_brain@meta.data[["pANN_0.25_0.09_879"]] <- NULL
+humanized_mouse_brain@meta.data[["pANN_0.25_0.09_867"]] <- NULL
 ```
 
 filter away cells that have a very high mitocondrial content 
@@ -212,7 +207,7 @@ humanized_mouse_brain[["percent.mt.hg38"]] <- PercentageFeatureSet(
   humanized_mouse_brain,
   pattern = "MT-"
 )
-humanized_mouse_brain[["percent.mt"]]<-humanized_mouse_brain[["percent.mt.mm10"]]+humanized_mouse_brain[["percent.mt.hg38"]]
+humanized_mouse_brain[["percent.mt"]] <- humanized_mouse_brain[["percent.mt.mm10"]] + humanized_mouse_brain[["percent.mt.hg38"]]
 ```
 
 check human vs mouse cells
@@ -220,13 +215,13 @@ check human vs mouse cells
 ```{r}
 # Assume this is your merged object
 obj <- humanized_mouse_brain
-DefaultAssay(obj)<-"RNA"
-obj<-JoinLayers(obj)
+DefaultAssay(obj) <- "RNA"
+obj <- JoinLayers(obj)
 # Count UMIs per cell for each species (adjust prefixes as needed)
 human_umis <- Matrix::colSums(
   GetAssayData(obj, assay = "RNA", layer = "counts")[grep("^GRCh38-", rownames(obj)), , drop = FALSE]
 )
-mouse_umis <-Matrix::colSums(
+mouse_umis <- Matrix::colSums(
   GetAssayData(obj, assay = "RNA", layer = "counts")[grep("^mm10-", rownames(obj)), , drop = FALSE]
 )
 
@@ -403,7 +398,7 @@ Despite in this experiment there are not multiple data batches and replicate we 
 ```{r}
 options(future.globals.maxSize = 100e+09)
 
-humanized_mouse_brain[["SCT"]]<-NULL
+humanized_mouse_brain[["SCT"]] <- NULL
 
 # Log-normalized analysis on RNA
 humanized_mouse_brain <- NormalizeData(humanized_mouse_brain, assay = "RNA")
@@ -419,7 +414,7 @@ humanized_mouse_brain <- RunPCA(humanized_mouse_brain, assay = "SCT", reduction.
 
 2.Having a look at the elbow plot to understand how many PCs are really informative, this value will be used in the subsequent analysis steps 
 ```{r}
-p1<-ElbowPlot(humanized_mouse_brain,reduction = "pca_SCT")
+p1 <- ElbowPlot(humanized_mouse_brain, reduction = "pca_SCT")
 p1
 ```
 After 15 SD the elbow plot becomes flat indicating that the majority of the information is explained by the first 15 dimension, this value will be used for the rest of the analysis.
@@ -442,7 +437,7 @@ my_colors <- c(
 )
 
 
-p1<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c("unintegrated_clusters"),cols = my_colors)+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p1 <- DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c("unintegrated_clusters"), cols = my_colors) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -460,7 +455,7 @@ p1<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c
     axis.text.y = element_blank()
   )
 
-p2<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c("orig.ident"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p2 <- DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c("orig.ident")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -478,7 +473,7 @@ p2<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c
     axis.text.y = element_blank()
   )
 
-p3<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c("sample"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p3 <- DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = c("sample")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -521,7 +516,7 @@ df <- as.data.frame(t)
 
 # Calculate the percentage of each plate within each cluster
 df <- df %>%
-  group_by(Cluster) %>%mutate(Percent = Freq / sum(Freq) * 100)
+  group_by(Cluster) %>% mutate(Percent = Freq / sum(Freq) * 100)
 
 # Plot the data
 ggplot(df, aes(x = Cluster, y = Percent, fill = Batch)) +
@@ -530,12 +525,12 @@ ggplot(df, aes(x = Cluster, y = Percent, fill = Batch)) +
   scale_fill_manual(values = rev(colors_vector)) +
   theme_classic() +
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 16),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 16),
     axis.text.y = element_text(family = "Arial", size = 16),
     axis.title.x = element_text(family = "Arial", size = 18),
     axis.title.y = element_text(family = "Arial", size = 18),
-    legend.text = element_text(size = 16,family = "Arial"),
-    legend.title = element_text(size = 18,family = "Arial")
+    legend.text = element_text(size = 16, family = "Arial"),
+    legend.title = element_text(size = 18, family = "Arial")
   ) +
   labs(y = "Percentage of cells", x = "Cluster", fill = "Animal") +
   guides(fill = guide_legend(ncol = 3, title.position = "top", title.hjust = 0.5))
@@ -559,15 +554,15 @@ humanized_mouse_brain <- IntegrateLayers(
   method = HarmonyIntegration,
   orig.reduction = "pca_SCT", new.reduction = "harmony",
   normalization.method = "SCT",
-  verbose = F
+  verbose = FALSE
 )
 humanized_mouse_brain <- FindNeighbors(humanized_mouse_brain, dims = 1:15, reduction = "harmony")
-humanized_mouse_brain <- FindClusters(humanized_mouse_brain, resolution = 0.1,cluster.name = "harmony_clusters")
+humanized_mouse_brain <- FindClusters(humanized_mouse_brain, resolution = 0.1, cluster.name = "harmony_clusters")
 ```
 
 2. Perform Dimensionality reduction
 ```{r}
-humanized_mouse_brain <- RunUMAP(humanized_mouse_brain, dims = 1:15, reduction = "harmony",reduction.name = "umap.harmony")
+humanized_mouse_brain <- RunUMAP(humanized_mouse_brain, dims = 1:15, reduction = "harmony", reduction.name = "umap.harmony")
 ```
 
 3.Plot UMAP with clusters and sample to check that the data integration effectively results in a better homogeneus dataset 
@@ -578,7 +573,7 @@ humanized_mouse_brain <- RunUMAP(humanized_mouse_brain, dims = 1:15, reduction =
 pal13 <- pals::glasbey(13)         # 13 very distinct colors
 pal13
 
-p1<-DimPlot(humanized_mouse_brain, reduction = "umap.harmony", group.by = c("harmony_clusters"), cols = pal13)+labs(x = "UMAP 1", y = "UMAP 2")+theme_minimal()+
+p1 <- DimPlot(humanized_mouse_brain, reduction = "umap.harmony", group.by = c("harmony_clusters"), cols = pal13) + labs(x = "UMAP 1", y = "UMAP 2") + theme_minimal() +
   theme(
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
@@ -589,7 +584,7 @@ p1<-DimPlot(humanized_mouse_brain, reduction = "umap.harmony", group.by = c("har
   )
 
 
-p2<-DimPlot(humanized_mouse_brain, reduction = "umap.harmony", group.by = c("sample"))+labs(x = "UMAP 1", y = "UMAP 2")+
+p2 <- DimPlot(humanized_mouse_brain, reduction = "umap.harmony", group.by = c("sample")) + labs(x = "UMAP 1", y = "UMAP 2") +
   ggtitle("") +  # Add your title here
  theme_minimal() +
   theme(
@@ -608,13 +603,13 @@ p2<-DimPlot(humanized_mouse_brain, reduction = "umap.harmony", group.by = c("sam
     axis.text.y = element_blank()
   )
 
-col<- c(
+col <- c(
   mouse = "grey80",
   human = "firebrick3"
 )
 
 
-p3<-DimPlot(humanized_mouse_brain, reduction = "umap.SCT", group.by = c("species"), cols = col)+labs(x = "UMAP 1", y = "UMAP 2")+
+p3 <- DimPlot(humanized_mouse_brain, reduction = "umap.SCT", group.by = c("species"), cols = col) + labs(x = "UMAP 1", y = "UMAP 2") +
   ggtitle("") +  # Add your title here
  theme_minimal() +
   theme(
@@ -659,7 +654,7 @@ df <- as.data.frame(t)
 
 # Calculate the percentage of each plate within each cluster
 df <- df %>%
-  group_by(Cluster) %>%mutate(Percent = Freq / sum(Freq) * 100)
+  group_by(Cluster) %>% mutate(Percent = Freq / sum(Freq) * 100)
 
 # Plot the data
 ggplot(df, aes(x = Cluster, y = Percent, fill = Batch)) +
@@ -668,12 +663,12 @@ ggplot(df, aes(x = Cluster, y = Percent, fill = Batch)) +
   scale_fill_manual(values = rev(colors_vector)) +
   theme_classic() +
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 16),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 16),
     axis.text.y = element_text(family = "Arial", size = 16),
     axis.title.x = element_text(family = "Arial", size = 18),
     axis.title.y = element_text(family = "Arial", size = 18),
-    legend.text = element_text(size = 16,family = "Arial"),
-    legend.title = element_text(size = 18,family = "Arial")
+    legend.text = element_text(size = 16, family = "Arial"),
+    legend.title = element_text(size = 18, family = "Arial")
   ) +
   labs(y = "Percentage of cells", x = "Cluster", fill = "Animal") +
   guides(fill = guide_legend(ncol = 3, title.position = "top", title.hjust = 0.5))
@@ -687,8 +682,8 @@ ggplot(df, aes(x = Cluster, y = Percent, fill = Batch)) +
 # find markers for every cluster compared to all remaining cells, report only the positive
 # ones
 
-DefaultAssay(humanized_mouse_brain)<-"SCT"
-humanized_mouse_brain <- PrepSCTFindMarkers(humanized_mouse_brain, assay = "SCT",verbose = T)
+DefaultAssay(humanized_mouse_brain) <- "SCT"
+humanized_mouse_brain <- PrepSCTFindMarkers(humanized_mouse_brain, assay = "SCT", verbose = TRUE)
 humanized_mouse_brain_markers <- FindAllMarkers(humanized_mouse_brain, only.pos = TRUE)
 
 
@@ -790,10 +785,10 @@ table(Idents(humanized_mouse_brain))
 my_colors <- c(
   "#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD",
   "#8C564B", "#17BECF", "#BCBD22", "#7F7F7F", "#e377c2",
-  "#aec7e8", "#ffbb78", "#98df8a"
+  "#aec7e8", "#ffbb78"
 )
 
-p1<-DimPlot(humanized_mouse_brain, reduction = "umap.rpca_SCT",group.by = "orig.ident")+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p1 <- DimPlot(humanized_mouse_brain, reduction = "umap.rpca_SCT", group.by = "orig.ident") + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -813,7 +808,7 @@ p1<-DimPlot(humanized_mouse_brain, reduction = "umap.rpca_SCT",group.by = "orig.
 
 colors_3 <- c("red", "#56B4E9", "#009E73")  # select the colors you want for the UMAP
 
-p2<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated",group.by = "broad_clustering", cols = my_colors)+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p2 <- DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated", group.by = "broad_clustering", cols = my_colors) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -833,6 +828,13 @@ p2<-DimPlot(humanized_mouse_brain, reduction = "umap.unintegrated",group.by = "b
 
 
 p2
+
+#update cluster calling myelin_MOL and MOL as unique cluster
+humanized_mouse_brain$broad_clustering <- as.character(humanized_mouse_brain$broad_clustering)
+humanized_mouse_brain$broad_clustering[grepl("^myelin[_ ]?mol$", humanized_mouse_brain$broad_clustering, ignore.case=TRUE)] <- "MOL"
+humanized_mouse_brain$broad_clustering <- factor(humanized_mouse_brain$broad_clustering)
+Idents(humanized_mouse_brain) <- humanized_mouse_brain$broad_clustering
+table(humanized_mouse_brain$broad_clustering)
 ```
 
 Dotplot for the broad clustering 
@@ -869,15 +871,15 @@ markers <- c(
   "mm10-Car8", "mm10-Pcp2", "mm10-Ppp1r17", "mm10-Col18a1", "mm10-Atp2a3"
 )
 
-p1<-DotPlot(humanized_mouse_brain, features = markers,group.by = "broad_clustering",cols = c("lightgrey", "firebrick"))+
+p1 <- DotPlot(humanized_mouse_brain, features = markers, group.by = "broad_clustering", cols = c("lightgrey", "firebrick")) +
   xlab("")+
   scale_x_discrete(labels = markers) + 
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 24,angle = 90),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 90),
     axis.text.y = element_text(family = "Arial", size = 20),
     axis.title.y = element_text(family = "Arial", size =24),
-    legend.text = element_text(size = 20,family = "Arial"),
-    legend.title = element_text(size = 24,family = "Arial")
+    legend.text = element_text(size = 20, family = "Arial"),
+    legend.title = element_text(size = 24, family = "Arial")
   ) 
 p1
 ```
@@ -896,7 +898,7 @@ With this line of code we will create a new Seurat object that will contain only
 
 
 
-OL <- subset(humanized_mouse_brain, idents = c("Myelin_MOL","MOL","OPcs"))            
+OL <- subset(humanized_mouse_brain, idents = c("Myelin_MOL", "MOL", "OPcs"))
 
 
 ```
@@ -906,19 +908,18 @@ OL <- subset(humanized_mouse_brain, idents = c("Myelin_MOL","MOL","OPcs"))
 1.Renormalize the datasets and recluster using only MOL cells   
 
 ```{r}
-DefaultAssay(OL)<-"RNA"
+DefaultAssay(OL) <- "RNA"
 
-# Remove the old SCT assay 
+# Remove the old SCT assay
 OL[["SCT"]] <- NULL
 
-# Now run SCTransform renormalizing with only the OL_OPC cells 
+# Now run SCTransform renormalizing with only the OL_OPC cells
 OL <- SCTransform(OL, vst.flavor = "v2", verbose = FALSE)
 
 # Continue with custom-named reductions
-OL <- RunPCA(OL, verbose = T, reduction.name = "pca_OL_SCT")
+OL <- RunPCA(OL, verbose = TRUE, reduction.name = "pca_OL_SCT")
 
-
-OL<- FindNeighbors(OL, reduction = "pca_OL_SCT", dims = 1:15, 
+OL <- FindNeighbors(OL, reduction = "pca_OL_SCT", dims = 1:15,
                       graph.name = c("OL_nn", "OL_snn"))
 
 OL <- FindClusters(OL, resolution = 0.1, 
@@ -945,7 +946,7 @@ my_colors <- c(
   "#17BECF"
 )
 
-p1<-DimPlot(OL, reduction = "umap_OL", group.by = c("OL_clusters"), cols=my_colors)+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with new clustering
+p1 <- DimPlot(OL, reduction = "umap_OL", group.by = c("OL_clusters"), cols = my_colors) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with new clustering
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -963,7 +964,7 @@ p1<-DimPlot(OL, reduction = "umap_OL", group.by = c("OL_clusters"), cols=my_colo
     axis.text.y = element_blank()
   )
 
-p2<-DimPlot(OL, reduction = "umap_OL", group.by = c("orig.ident"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p2 <- DimPlot(OL, reduction = "umap_OL", group.by = c("orig.ident")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -981,7 +982,7 @@ p2<-DimPlot(OL, reduction = "umap_OL", group.by = c("orig.ident"))+labs(x = "UMA
     axis.text.y = element_blank()
   )
 
-p3<-DimPlot(OL, reduction = "umap_OL", group.by = c("sample"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p3 <- DimPlot(OL, reduction = "umap_OL", group.by = c("sample")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -999,7 +1000,7 @@ p3<-DimPlot(OL, reduction = "umap_OL", group.by = c("sample"))+labs(x = "UMAP 1"
     axis.text.y = element_blank()
   )
 
-p4<-DimPlot(OL, reduction = "umap_OL", group.by = c("broad_clustering"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p4 <- DimPlot(OL, reduction = "umap_OL", group.by = c("broad_clustering")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -1049,7 +1050,7 @@ df <- as.data.frame(t)
 
 # Calculate the percentage of each plate within each cluster
 df <- df %>%
-  group_by(Cluster) %>%mutate(Percent = Freq / sum(Freq) * 100)
+  group_by(Cluster) %>% mutate(Percent = Freq / sum(Freq) * 100)
 
 # Plot the data
 ggplot(df, aes(x = Cluster, y = Percent, fill = Batch)) +
@@ -1058,12 +1059,12 @@ ggplot(df, aes(x = Cluster, y = Percent, fill = Batch)) +
   scale_fill_manual(values = rev(colors_vector)) +
   theme_classic() +
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 16),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 16),
     axis.text.y = element_text(family = "Arial", size = 16),
     axis.title.x = element_text(family = "Arial", size = 18),
     axis.title.y = element_text(family = "Arial", size = 18),
-    legend.text = element_text(size = 16,family = "Arial"),
-    legend.title = element_text(size = 18,family = "Arial")
+    legend.text = element_text(size = 16, family = "Arial"),
+    legend.title = element_text(size = 18, family = "Arial")
   ) +
   labs(y = "Percentage of cells", x = "Cluster", fill = "Animal") +
   guides(fill = guide_legend(ncol = 3, title.position = "top", title.hjust = 0.5))
@@ -1097,15 +1098,15 @@ markers <- c(
   
 )
 
-p1<-DotPlot(OL, features = markers,group.by = "OL_clusters",cols = c("lightgrey", "firebrick"))+
+p1 <- DotPlot(OL, features = markers, group.by = "OL_clusters", cols = c("lightgrey", "firebrick")) +
   xlab("")+
   scale_x_discrete(labels = markers) + 
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 24,angle = 90),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 90),
     axis.text.y = element_text(family = "Arial", size = 20),
     axis.title.y = element_text(family = "Arial", size =24),
-    legend.text = element_text(size = 20,family = "Arial"),
-    legend.title = element_text(size = 24,family = "Arial")
+    legend.text = element_text(size = 20, family = "Arial"),
+    legend.title = element_text(size = 24, family = "Arial")
   ) 
 p1
 ```
@@ -1126,15 +1127,15 @@ markers <- c(
   
 )
 
-p1<-DotPlot(OL, features = markers,group.by = "OL_clusters",cols = c("lightgrey", "firebrick"))+
+p1 <- DotPlot(OL, features = markers, group.by = "OL_clusters", cols = c("lightgrey", "firebrick")) +
   xlab("")+
   scale_x_discrete(labels = markers) + 
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 24,angle = 90),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 90),
     axis.text.y = element_text(family = "Arial", size = 20),
     axis.title.y = element_text(family = "Arial", size =24),
-    legend.text = element_text(size = 20,family = "Arial"),
-    legend.title = element_text(size = 24,family = "Arial")
+    legend.text = element_text(size = 20, family = "Arial"),
+    legend.title = element_text(size = 24, family = "Arial")
   ) 
 p1
 ```
@@ -1146,9 +1147,9 @@ Marker features calculations in OLs
 # find markers for every cluster compared to all remaining cells, report only the positive
 # ones
 
-  DefaultAssay(OL)<-"SCT"
-  OL<- PrepSCTFindMarkers(OL, assay = "SCT",verbose = T)
-  OL_markers<- FindAllMarkers(OL, only.pos = TRUE)
+  DefaultAssay(OL) <- "SCT"
+  OL <- PrepSCTFindMarkers(OL, assay = "SCT", verbose = TRUE)
+  OL_markers <- FindAllMarkers(OL, only.pos = TRUE)
 
 
  # Create a new workbook
@@ -1162,8 +1163,8 @@ for (cluster_value in unique(OL_markers$cluster)) {
   writeData(wb, sheet_name, cluster_data)
 }
 
-# Save the workbook to a file
-saveWorkbook(wb, "/date/gcb/gcb_MZ/Humanized_mice_OD/Seurat_clusters_OLs.xlsx", overwrite = TRUE)
+# Save the workbook to a file 
+saveWorkbook(wb, "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/cluster_markers/Oligodendroglia_markers.xlsx", overwrite = TRUE)
 ```
 
 Plotting cluster Markers
@@ -1194,15 +1195,15 @@ markers <- c(
   
 
 
-p1<-DotPlot(OL, features = markers,group.by = "OL_clusters",cols = c("lightgrey", "firebrick"))+
+p1 <- DotPlot(OL, features = markers, group.by = "OL_clusters", cols = c("lightgrey", "firebrick")) +
   xlab("")+
   scale_x_discrete(labels = markers) + 
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 24,angle = 90),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 90),
     axis.text.y = element_text(family = "Arial", size = 20),
     axis.title.y = element_text(family = "Arial", size =24),
-    legend.text = element_text(size = 20,family = "Arial"),
-    legend.title = element_text(size = 24,family = "Arial")
+    legend.text = element_text(size = 20, family = "Arial"),
+    legend.title = element_text(size = 24, family = "Arial")
   ) 
 p1
 ```
@@ -1317,18 +1318,18 @@ plot_df <- ego_df %>%
   ungroup() %>%
   mutate(Description = fct_reorder(Description, mLog10Padj))
 
-p1<-ggplot(plot_df, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
+p1 <- ggplot(plot_df, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
   geom_point() +
   scale_color_gradient(low = "gold", high = "red") +
   labs(title = "GO BP enrichment per cluster", x = "Cluster", y = "Term", color = "-log10(FDR)") +
   theme_bw(base_size = 12) + theme_classic()+
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 24,angle = 45),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 45),
     axis.text.y = element_text(family = "Arial", size = 24),
     axis.title.y = element_text(family = "Arial", size =28, face = "bold"),
     axis.title.x = element_text(family = "Arial", size =28, face = "bold"),
-    legend.text = element_text(size = 24,family = "Arial"),
-    legend.title = element_text(size = 32,family = "Arial",face = "bold")
+    legend.text = element_text(size = 24, family = "Arial"),
+    legend.title = element_text(size = 32, family = "Arial", face = "bold")
   ) 
 plots <- list(Func_enrich_GO=p1)
 for (nm in names(plots)) {
@@ -1410,18 +1411,18 @@ plot_df_kegg <- kegg_df %>%
   ungroup() %>%
   mutate(Description = fct_reorder(Description, mLog10Padj))
 
-p1<-ggplot(plot_df_kegg, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
+p1 <- ggplot(plot_df_kegg, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
   geom_point() +
   scale_color_gradient(low = "gold", high = "red") +
   labs(title = "KEGG enrichment per cluster", x = "Cluster", y = "Pathway", color = "-log10(FDR)") +
   theme_bw(base_size = 12)+theme_classic()+
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 24,angle = 45),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 45),
     axis.text.y = element_text(family = "Arial", size = 24),
     axis.title.y = element_text(family = "Arial", size =28, face = "bold"),
     axis.title.x = element_text(family = "Arial", size =28, face = "bold"),
-    legend.text = element_text(size = 24,family = "Arial"),
-    legend.title = element_text(size = 32,family = "Arial",face = "bold")
+    legend.text = element_text(size = 24, family = "Arial"),
+    legend.title = element_text(size = 32, family = "Arial", face = "bold")
   ) 
 plots <- list(Func_enrich_KEGG=p1)
 for (nm in names(plots)) {
@@ -1440,7 +1441,7 @@ With this line of code we will create a new Seurat object that will contain only
 ```{r}
 
 
-Microglia <- subset(humanized_mouse_brain, idents = c("Microglia"))            
+Microglia <- subset(humanized_mouse_brain, idents = c("Microglia"))
 
 
 ```
@@ -1450,19 +1451,18 @@ Microglia <- subset(humanized_mouse_brain, idents = c("Microglia"))
 1.Renormalize the datasets and recluster using only MOL cells   
 
 ```{r}
-DefaultAssay(Microglia)<-"RNA"
+DefaultAssay(Microglia) <- "RNA"
 
-# Remove the Microgliad SCT assay 
+# Remove the old SCT assay
 Microglia[["SCT"]] <- NULL
 
-# Now run SCTransform renormalizing with only the Microglia_OPC cells 
+# Now run SCTransform renormalizing with only the Microglia cells
 Microglia <- SCTransform(Microglia, vst.flavor = "v2", verbose = FALSE)
 
 # Continue with custom-named reductions
-Microglia <- RunPCA(Microglia, verbose = T, reduction.name = "pca_Microglia_SCT")
+Microglia <- RunPCA(Microglia, verbose = TRUE, reduction.name = "pca_Microglia_SCT")
 
-
-Microglia<- FindNeighbors(Microglia, reduction = "pca_Microglia_SCT", dims = 1:15, 
+Microglia <- FindNeighbors(Microglia, reduction = "pca_Microglia_SCT", dims = 1:15,
                       graph.name = c("Microglia_nn", "Microglia_snn"))
 
 Microglia <- FindClusters(Microglia, resolution = 0.1, 
@@ -1476,7 +1476,7 @@ Microglia <- RunUMAP(Microglia, reduction = "pca_Microglia_SCT", dims = 1:15,
 ```
 
 ```{r}
-p1<-DimPlot(Microglia, reduction = "umap_Microglia", group.by = c("Microglia_clusters"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with new clustering
+p1 <- DimPlot(Microglia, reduction = "umap_Microglia", group.by = c("Microglia_clusters")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with new clustering
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -1494,7 +1494,7 @@ p1<-DimPlot(Microglia, reduction = "umap_Microglia", group.by = c("Microglia_clu
     axis.text.y = element_blank()
   )
 
-p2<-DimPlot(Microglia, reduction = "umap_Microglia", group.by = c("orig.ident"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p2 <- DimPlot(Microglia, reduction = "umap_Microglia", group.by = c("orig.ident")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -1512,7 +1512,7 @@ p2<-DimPlot(Microglia, reduction = "umap_Microglia", group.by = c("orig.ident"))
     axis.text.y = element_blank()
   )
 
-p3<-DimPlot(Microglia, reduction = "umap_Microglia", group.by = c("sample"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p3 <- DimPlot(Microglia, reduction = "umap_Microglia", group.by = c("sample")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -1530,7 +1530,7 @@ p3<-DimPlot(Microglia, reduction = "umap_Microglia", group.by = c("sample"))+lab
     axis.text.y = element_blank()
   )
 
-p4<-DimPlot(Microglia, reduction = "umap_Microglia", group.by = c("broad_clustering"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p4 <- DimPlot(Microglia, reduction = "umap_Microglia", group.by = c("broad_clustering")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -1561,9 +1561,9 @@ Marker features calculations in OLs
 # find markers for every cluster compared to all remaining cells, report only the positive
 # ones
 
-DefaultAssay(Microglia)<-"SCT"
-Microglia<- PrepSCTFindMarkers(Microglia, assay = "SCT",verbose = T)
-Microglia_markers<- FindAllMarkers(Microglia, only.pos = TRUE)
+DefaultAssay(Microglia) <- "SCT"
+Microglia <- PrepSCTFindMarkers(Microglia, assay = "SCT", verbose = TRUE)
+Microglia_markers <- FindAllMarkers(Microglia, only.pos = TRUE)
 
 
  # Create a new workbook
@@ -1606,15 +1606,15 @@ markers <- c(
   
 
 
-p1<-DotPlot(OL, features = markers,group.by = "OL_clusters",cols = c("lightgrey", "firebrick"))+
+p1 <- DotPlot(OL, features = markers, group.by = "OL_clusters", cols = c("lightgrey", "firebrick")) +
   xlab("")+
   scale_x_discrete(labels = markers) + 
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 24,angle = 90),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 90),
     axis.text.y = element_text(family = "Arial", size = 20),
     axis.title.y = element_text(family = "Arial", size =24),
-    legend.text = element_text(size = 20,family = "Arial"),
-    legend.title = element_text(size = 24,family = "Arial")
+    legend.text = element_text(size = 20, family = "Arial"),
+    legend.title = element_text(size = 24, family = "Arial")
   ) 
 p1
 ```
@@ -1721,18 +1721,18 @@ plot_df <- ego_df %>%
   ungroup() %>%
   mutate(Description = fct_reorder(Description, mLog10Padj))
 
-p1<-ggplot(plot_df, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
+p1 <- ggplot(plot_df, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
   geom_point() +
   scale_color_gradient(low = "gold", high = "red") +
   labs(title = "GO BP enrichment per cluster", x = "Cluster", y = "Term", color = "-log10(FDR)") +
   theme_bw(base_size = 12) + theme_classic()+
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 24,angle = 45),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 45),
     axis.text.y = element_text(family = "Arial", size = 24),
     axis.title.y = element_text(family = "Arial", size =28, face = "bold"),
     axis.title.x = element_text(family = "Arial", size =28, face = "bold"),
-    legend.text = element_text(size = 24,family = "Arial"),
-    legend.title = element_text(size = 32,family = "Arial",face = "bold")
+    legend.text = element_text(size = 24, family = "Arial"),
+    legend.title = element_text(size = 32, family = "Arial", face = "bold")
   ) 
 plots <- list(Func_enrich_GO=p1)
 for (nm in names(plots)) {
@@ -1744,8 +1744,8 @@ p1
 
 ```{r}
 # 1) cluster set
-broad_clusters <- unique(humanized_mouse_brain$broad_clustering)
-
+#broad_clusters <- unique(humanized_mouse_brain$broad_clustering)
+broad_clusters <- "MOL"
 # storage
 clusters_objects <- list()
 
@@ -1771,12 +1771,12 @@ for (bc in broad_clusters) {
   # store into list by key
   clusters_objects[[obj_name]] <- OL
   # save object
-  saveRDS(OL, file = file.path("/date/gcb/gcb_MZ/Humanized_mice_OD",
+  saveRDS(OL, file = file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/objects/",
                                paste0(obj_name, "_SCT.rds")))
   # markers
   DefaultAssay(OL) <- "SCT"
-  OL <- PrepSCTFindMarkers(OL, assay="SCT", verbose=FALSE)
-  OL_markers <- FindAllMarkers(OL, only.pos=TRUE)
+  OL <- PrepSCTFindMarkers(OL, assay = "SCT", verbose = FALSE)
+  OL_markers <- FindAllMarkers(OL, only.pos = TRUE)
 
   # Create a new workbook
   wb <- createWorkbook()
@@ -1833,18 +1833,18 @@ plot_df <- ego_df %>%
   ungroup() %>%
   mutate(Description = fct_reorder(Description, mLog10Padj))
 
-p1<-ggplot(plot_df, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
+p1 <- ggplot(plot_df, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
   geom_point() +
   scale_color_gradient(low = "gold", high = "red") +
   labs(title = "GO BP enrichment per cluster", x = "Cluster", y = "Term", color = "-log10(FDR)") +
   theme_bw(base_size = 12) + theme_classic()+
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 24,angle = 45),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 45),
     axis.text.y = element_text(family = "Arial", size = 24),
     axis.title.y = element_text(family = "Arial", size =28, face = "bold"),
     axis.title.x = element_text(family = "Arial", size =28, face = "bold"),
-    legend.text = element_text(size = 24,family = "Arial"),
-    legend.title = element_text(size = 32,family = "Arial",face = "bold")
+    legend.text = element_text(size = 24, family = "Arial"),
+    legend.title = element_text(size = 32, family = "Arial", face = "bold")
   ) 
 plots <- list(Func_enrich_GO=p1)
 for (nm in names(plots)) {
@@ -1861,11 +1861,11 @@ resave cluster makers correclty
 for (bc in broad_clusters) {
   message("Calculating cluster makers: ", bc)
   bc_clean <- make.names(bc)
-  OL<- clusters_objects[[bc_clean]]
+  OL <- clusters_objects[[bc_clean]]
   # markers
   DefaultAssay(OL) <- "SCT"
-  OL <- PrepSCTFindMarkers(OL, assay="SCT", verbose=FALSE)
-  OL_markers <- FindAllMarkers(OL, only.pos=TRUE)
+  OL <- PrepSCTFindMarkers(OL, assay = "SCT", verbose = FALSE)
+  OL_markers <- FindAllMarkers(OL, only.pos = TRUE)
   # Create a new workbook
   wb <- createWorkbook()
 
@@ -1892,7 +1892,7 @@ for (bc in broad_clusters) {
   umap_name <- paste0("umap_", bc_clean)
   clu_name <- paste0(bc_clean, "_clusters")
   
-  p1<-DimPlot(obj, reduction = umap_name, group.by = c(clu_name))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with new clustering
+  p1 <- DimPlot(obj, reduction = umap_name, group.by = c(clu_name)) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with new clustering
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -1910,7 +1910,7 @@ for (bc in broad_clusters) {
     axis.text.y = element_blank()
   )
 
-p2<-DimPlot(obj, reduction = umap_name, group.by = c("orig.ident"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p2 <- DimPlot(obj, reduction = umap_name, group.by = c("orig.ident")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -1928,7 +1928,7 @@ p2<-DimPlot(obj, reduction = umap_name, group.by = c("orig.ident"))+labs(x = "UM
     axis.text.y = element_blank()
   )
 
-p3<-DimPlot(obj, reduction = umap_name, group.by = c("sample"))+labs(x = "UMAP 1", y = "UMAP 2")+ #UMAP with samples
+p3 <- DimPlot(obj, reduction = umap_name, group.by = c("sample")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -1967,11 +1967,11 @@ for (bc in broad_clusters) {
   clu_name <- paste0(bc_clean, "_clusters")
   # marker genes computed above
   
-  obj<- clusters_objects[[bc_clean]]
+  obj <- clusters_objects[[bc_clean]]
   # markers
   DefaultAssay(obj) <- "SCT"
-  obj<- PrepSCTFindMarkers(obj, assay="SCT", verbose=FALSE)
-  obj_markers <- FindAllMarkers(obj, only.pos=TRUE)
+  obj <- PrepSCTFindMarkers(obj, assay = "SCT", verbose = FALSE)
+  obj_markers <- FindAllMarkers(obj, only.pos = TRUE)
   cat("Calculating GO for cluster: ", bc)
   pos_markers <- obj_markers%>%
   dplyr::select(cluster, gene)
@@ -2058,18 +2058,18 @@ plot_df <- ego_df %>%
   ungroup() %>%
   mutate(Description = fct_reorder(Description, mLog10Padj))
 
-p1<-ggplot(plot_df, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
+p1 <- ggplot(plot_df, aes(x = cluster, y = Description, size = Count, color = mLog10Padj)) +
   geom_point() +
   scale_color_gradient(low = "gold", high = "red") +
   labs(title = "GO BP enrichment per cluster", x = "Cluster", y = "Term", color = "-log10(FDR)") +
   theme_bw(base_size = 12) + theme_classic()+
   theme(
-    axis.text.x = element_text( hjust = 1, vjust = 0.5, family = "Arial", size = 24,angle = 45),
+    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 24, angle = 45),
     axis.text.y = element_text(family = "Arial", size = 24),
     axis.title.y = element_text(family = "Arial", size =28, face = "bold"),
     axis.title.x = element_text(family = "Arial", size =28, face = "bold"),
-    legend.text = element_text(size = 24,family = "Arial"),
-    legend.title = element_text(size = 32,family = "Arial",face = "bold")
+    legend.text = element_text(size = 24, family = "Arial"),
+    legend.title = element_text(size = 32, family = "Arial", face = "bold")
   ) 
 plots <- list(Func_enrich_GO=p1)
 for (nm in names(plots)) {
@@ -2093,6 +2093,208 @@ Save objects
 saveRDS(Microglia,"/date/gcb/gcb_MZ/Humanized_mice_OD/Results/objects/Microglia_SCT.rds")
 saveRDS(OL,"/date/gcb/gcb_MZ/Humanized_mice_OD/Results/objects/Oligodendroglia_SCT.rds")
 saveRDS(humanized_mouse_brain,"/date/gcb/gcb_MZ/Humanized_mice_OD/Results/objects/humanized_mouse_brain_whole_doublets.rds")
+```
+
+
+
+
+##5. Differential Gene Expression Analysis: EAE vs CFA
+
+Pseudobulk DESeq2 is used to compare EAE (n = 3 animals) vs CFA (n = 2 animals)
+within each cluster. Raw counts are aggregated per sample per cluster before running
+DESeq2, which avoids pseudo-replication and handles unequal group sizes naturally.
+CFA is the reference level; positive log2FC values indicate higher expression in EAE.
+
+##5.1 Setup: load libraries and derive condition metadata
+
+```{r}
+library(DESeq2)
+library(ggrepel)
+
+# Derive condition from the sample label (set during object creation)
+humanized_mouse_brain$condition <- ifelse(grepl("^EAE", humanized_mouse_brain$sample), "EAE", "CFA")
+
+table(humanized_mouse_brain$sample, humanized_mouse_brain$condition)
+```
+
+##5.2 Helper functions
+
+```{r}
+# Pseudobulk DESeq2 for one cluster ----------------------------------------
+# Returns a data.frame of DESeq2 results (EAE vs CFA), or NULL if the cluster
+# does not meet quality filters.
+run_pseudobulk_dge <- function(seurat_obj,
+                                cluster_col,
+                                cluster_id,
+                                sample_col    = "sample",
+                                condition_col = "condition",
+                                min_cells     = 10,
+                                min_counts    = 10) {
+  idx <- seurat_obj@meta.data[[cluster_col]] == cluster_id
+  if (sum(idx) < min_cells) {
+    message("Skipping cluster ", cluster_id, ": only ", sum(idx), " cells")
+    return(NULL)
+  }
+
+  sub_obj <- seurat_obj[, idx]
+  DefaultAssay(sub_obj) <- "RNA"
+  sub_obj <- JoinLayers(sub_obj)
+  counts_mat <- GetAssayData(sub_obj, assay = "RNA", layer = "counts")
+
+  # Aggregate counts per sample (pseudobulk)
+  samples <- unique(sub_obj@meta.data[[sample_col]])
+  pb_mat <- vapply(samples, function(s) {
+    s_cells <- sub_obj@meta.data[[sample_col]] == s
+    as.numeric(Matrix::rowSums(counts_mat[, s_cells, drop = FALSE]))
+  }, numeric(nrow(counts_mat)))
+  rownames(pb_mat) <- rownames(counts_mat)
+
+  # Sample-level metadata; CFA is the reference level
+  col_meta <- data.frame(
+    sample    = samples,
+    condition = factor(
+      sapply(samples, function(s)
+        unique(sub_obj@meta.data[[condition_col]][sub_obj@meta.data[[sample_col]] == s])),
+      levels = c("CFA", "EAE")
+    ),
+    row.names = samples
+  )
+
+  if (sum(col_meta$condition == "EAE") == 0 || sum(col_meta$condition == "CFA") == 0) {
+    message("Skipping cluster ", cluster_id, ": only one condition represented")
+    return(NULL)
+  }
+
+  # Filter lowly expressed genes
+  pb_mat <- pb_mat[rowSums(pb_mat) >= min_counts, , drop = FALSE]
+  if (nrow(pb_mat) < 10) {
+    message("Skipping cluster ", cluster_id, ": too few expressed genes after filtering")
+    return(NULL)
+  }
+
+  tryCatch({
+    dds <- DESeqDataSetFromMatrix(countData = round(pb_mat),
+                                   colData   = col_meta,
+                                   design    = ~ condition)
+    dds <- DESeq(dds, quiet = TRUE)
+    res <- results(dds, contrast = c("condition", "EAE", "CFA"))
+    res_df <- as.data.frame(res)
+    res_df$gene    <- rownames(res_df)
+    res_df$cluster <- as.character(cluster_id)
+    res_df[order(res_df$padj, na.last = TRUE), ]
+  }, error = function(e) {
+    message("DESeq2 error – cluster ", cluster_id, ": ", conditionMessage(e))
+    NULL
+  })
+}
+
+# Volcano plot helper -------------------------------------------------------
+plot_volcano <- function(res_df, cluster_label,
+                          padj_thresh = 0.05, lfc_thresh = 0.5, top_n = 15) {
+  df <- res_df %>%
+    filter(!is.na(padj), !is.na(log2FoldChange)) %>%
+    mutate(
+      sig = case_when(
+        padj < padj_thresh & log2FoldChange >  lfc_thresh ~ "Up in EAE",
+        padj < padj_thresh & log2FoldChange < -lfc_thresh ~ "Up in CFA",
+        TRUE ~ "NS"
+      )
+    ) %>%
+    mutate(label = ifelse(sig != "NS" & rank(padj, ties.method = "first") <= top_n,
+                          gene, NA_character_))
+
+  ggplot(df, aes(x = log2FoldChange, y = -log10(padj), color = sig)) +
+    geom_point(alpha = 0.6, size = 1.5) +
+    ggrepel::geom_text_repel(aes(label = label), size = 3, max.overlaps = 20, na.rm = TRUE) +
+    scale_color_manual(
+      values = c("Up in EAE" = "firebrick", "Up in CFA" = "steelblue", "NS" = "grey70")
+    ) +
+    geom_vline(xintercept = c(-lfc_thresh, lfc_thresh), linetype = "dashed", colour = "grey40") +
+    geom_hline(yintercept = -log10(padj_thresh),         linetype = "dashed", colour = "grey40") +
+    labs(
+      title = paste("EAE vs CFA –", cluster_label),
+      x     = "log2 Fold Change (EAE / CFA)",
+      y     = "-log10(adjusted p-value)",
+      color = NULL
+    ) +
+    theme_classic() +
+    theme(
+      plot.title  = element_text(hjust = 0.5, size = 16, face = "bold"),
+      axis.text   = element_text(size = 12),
+      axis.title  = element_text(size = 14),
+      legend.text = element_text(size = 12)
+    )
+}
+```
+
+##5.3 DGE within each harmony cluster (whole-brain object)
+
+```{r}
+harmony_cluster_ids <- levels(humanized_mouse_brain$harmony_clusters)
+
+dge_brain_list <- lapply(harmony_cluster_ids, function(cl) {
+  message("Running DGE for harmony cluster: ", cl)
+  run_pseudobulk_dge(
+    seurat_obj  = humanized_mouse_brain,
+    cluster_col = "harmony_clusters",
+    cluster_id  = cl
+  )
+})
+names(dge_brain_list) <- harmony_cluster_ids
+
+# Combine into one data.frame
+dge_brain_all <- do.call(rbind, Filter(Negate(is.null), dge_brain_list))
+
+# Save to Excel (one sheet per cluster)
+wb_brain <- createWorkbook()
+for (cl in names(dge_brain_list)) {
+  if (!is.null(dge_brain_list[[cl]])) {
+    sheet_name <- substr(paste0("Cluster_", cl), 1, 31)
+    addWorksheet(wb_brain, sheet_name)
+    writeData(wb_brain, sheet_name, dge_brain_list[[cl]])
+  }
+}
+saveWorkbook(wb_brain,
+             "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/DGE_EAE_vs_CFA_harmony_clusters.xlsx",
+             overwrite = TRUE)
+cat("Saved whole-brain DGE results.\n")
+```
+
+Volcano plots – whole-brain harmony clusters
+
+```{r, fig.height=6, fig.width=8}
+for (cl in names(dge_brain_list)) {
+  if (!is.null(dge_brain_list[[cl]]) && sum(!is.na(dge_brain_list[[cl]]$padj)) > 0) {
+    print(plot_volcano(dge_brain_list[[cl]], paste("Harmony cluster", cl)))
+  }
+}
+```
+
+##5.4 Summary: number of significant DEGs per cluster (padj < 0.05, |log2FC| > 0.5)
+
+```{r}
+summarise_dge <- function(dge_list) {
+  do.call(rbind, lapply(names(dge_list), function(cl) {
+    df <- dge_list[[cl]]
+    if (is.null(df)) return(data.frame(cluster = cl, n_up_EAE = NA, n_up_CFA = NA))
+    df <- df[!is.na(df$padj), ]
+    data.frame(
+      cluster  = cl,
+      n_up_EAE = sum(df$padj < 0.05 & df$log2FoldChange >  0.5),
+      n_up_CFA = sum(df$padj < 0.05 & df$log2FoldChange < -0.5)
+    )
+  }))
+}
+
+dge_summary <- summarise_dge(dge_brain_list)
+print(dge_summary)
+
+wb_summary <- createWorkbook()
+addWorksheet(wb_summary, "DGE_summary")
+writeData(wb_summary, "DGE_summary", dge_summary)
+saveWorkbook(wb_summary,
+             "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/DGE_EAE_vs_CFA_summary.xlsx",
+             overwrite = TRUE)
 ```
 
 

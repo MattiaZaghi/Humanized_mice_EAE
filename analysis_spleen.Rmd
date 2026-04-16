@@ -41,6 +41,7 @@ library(hdf5r)
 library(patchwork)
 library(pals)
 library(knitr)
+library(harmony)
 library(DoubletFinder)
 opts_knit$set(root.dir = "/date/gcb/gcb_MZ/Humanized_mice_OD/")# change accordingly
 
@@ -604,13 +605,11 @@ In this section the dimensionality reduction will be performed including data in
 
 ```{r}
 
-humanized_mouse_spleen <- IntegrateLayers(
-  object = humanized_mouse_spleen,
-  method = HarmonyIntegration,
-  orig.reduction = "pca_SCT", new.reduction = "harmony",
-  normalization.method = "SCT",
-  verbose = FALSE
-)
+humanized_mouse_spleen <- RunHarmony(humanized_mouse_spleen,
+                                     group.by.vars = "orig.ident",
+                                     reduction = "pca_SCT",
+                                     reduction.save = "harmony",
+                                     verbose = TRUE)
 humanized_mouse_spleen <- FindNeighbors(humanized_mouse_spleen, dims = 1:15, reduction = "harmony")
 humanized_mouse_spleen <- FindClusters(humanized_mouse_spleen, resolution = 0.1, cluster.name = "harmony_clusters")
 ```

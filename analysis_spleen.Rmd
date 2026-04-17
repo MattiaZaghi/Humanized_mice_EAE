@@ -605,11 +605,16 @@ In this section the dimensionality reduction will be performed including data in
 
 ```{r}
 
-humanized_mouse_spleen <- RunHarmony(humanized_mouse_spleen,
-                                     group.by.vars = "orig.ident",
-                                     reduction = "pca_SCT",
-                                     reduction.save = "harmony",
-                                     verbose = TRUE)
+humanized_mouse_spleen[["SCT"]] <- split(humanized_mouse_spleen[["SCT"]], f = humanized_mouse_spleen$sample)                                                                            
+                                                                                                                                                                                          
+  humanized_mouse_spleen <- IntegrateLayers(                                                                                                                                              
+    object = humanized_mouse_spleen,                                                                                                                                                      
+    method = HarmonyIntegration,                                                                                                                                                          
+    orig.reduction = "pca_SCT", new.reduction = "harmony",                                                                                                                                
+    normalization.method = "SCT",                                                                                                                                                         
+    verbose = FALSE                                                                                                                                                                       
+  )                                                         
+          
 humanized_mouse_spleen <- FindNeighbors(humanized_mouse_spleen, dims = 1:15, reduction = "harmony")
 humanized_mouse_spleen <- FindClusters(humanized_mouse_spleen, resolution = 0.1, cluster.name = "harmony_clusters")
 ```
@@ -621,24 +626,49 @@ humanized_mouse_spleen <- RunUMAP(humanized_mouse_spleen, dims = 1:15, reduction
 
 3.Plot UMAP with clusters and sample to check that the data integration effectively results in a better homogeneus dataset 
 
-```{r}
+```{r,fig.height=10, fig.width=10}
 
 
 pal13 <- pals::glasbey(13)         # 13 very distinct colors
 pal13
 
-p1 <- DimPlot(humanized_mouse_spleen, reduction = "umap.harmony", group.by = c("harmony_clusters"), cols = pal13) + labs(x = "UMAP 1", y = "UMAP 2") + theme_minimal() +
+p1 <- DimPlot(humanized_mouse_spleen, reduction = "umap.harmony", group.by = c("harmony_clusters"), cols = pal13) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
+ theme_minimal() +
   theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
     axis.text.x = element_blank(),
-    axis.text.y = element_blank(),
-     plot.title = element_blank()
-
+    axis.text.y = element_blank()
   )
 
+p2 <- DimPlot(humanized_mouse_spleen, reduction = "umap.harmony", group.by = c("orig.ident")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
 
-p2 <- DimPlot(humanized_mouse_spleen, reduction = "umap.harmony", group.by = c("sample")) + labs(x = "UMAP 1", y = "UMAP 2") +
+p3 <- DimPlot(humanized_mouse_spleen, reduction = "umap.harmony", group.by = c("sample")) + labs(x = "UMAP 1", y = "UMAP 2") +
   ggtitle("") +  # Add your title here
  theme_minimal() +
   theme(
@@ -663,7 +693,7 @@ col<- c(
 )
 
 
-p3 <- DimPlot(humanized_mouse_spleen, reduction = "umap.harmony", group.by = c("species"), cols = col) + labs(x = "UMAP 1", y = "UMAP 2") +
+p4 <- DimPlot(humanized_mouse_spleen, reduction = "umap.harmony", group.by = c("species"), cols = col) + labs(x = "UMAP 1", y = "UMAP 2") +
   ggtitle("") +  # Add your title here
  theme_minimal() +
   theme(
@@ -685,12 +715,13 @@ p3 <- DimPlot(humanized_mouse_spleen, reduction = "umap.harmony", group.by = c("
 p1
 p2
 p3
+p4
 ```
 
 
 clusters proportions
 
-```{r}
+```{r,fig.height=10, fig.width=20}
 colors_vector <- c(
   "CFA_spleen_1" = "#E41A1C",
   "CFA_spleen_2" = "#377EB8",
@@ -735,7 +766,9 @@ ggplot(df, aes(x = Cluster, y = Percent, fill = Batch)) +
 
 # find markers for every cluster compared to all remaining cells, report only the positive
 # ones
-
+Idents(humanized_mouse_spleen) <- "unintegrated_clusters"    
+humanized_mouse_spleen <- SCTransform(humanized_mouse_spleen, verbose = TRUE)
+humanized_mouse_spleen <- FindVariableFeatures(humanized_mouse_spleen, assay = "SCT")
 DefaultAssay(humanized_mouse_spleen) <- "SCT"
 humanized_mouse_spleen <- PrepSCTFindMarkers(humanized_mouse_spleen, assay = "SCT", verbose = TRUE)
 humanized_mouse_spleen_markers <- FindAllMarkers(humanized_mouse_spleen, only.pos = TRUE)
@@ -825,9 +858,8 @@ p
 5.Cluster renaming, based on the very broad classification OL, OPCs or microglia, this clustering to subset only MOLs to subsequently use them in the next analysis. The UMAP plot with the samples correponds to fig.3C and the UMAP plot with the broad cell types corresponds to Fig.S3B. 
 
 ```{r,fig.height=10, fig.width=10}
-broad_clustering <- c("Cerebellar_Granule_Cells","Excitatory_Cortical_Neu","SST_Gaba_Neu","Stria_MGE_Inter_Neu","MOL",
-                      "Astrocytes","Medium_Spiny_Neu_Stria","Myelin_MOL","Cerebellar_Inhib_Interneu_Pvalb+",
-                      "Microglia","Thal_Neu","OPcs","Purkinje_Cells")
+broad_clustering <- c("Mixed_immune","Macrophages","CD4_T_Cells","erythroid_progenitors","B_Cells_prog",
+                      "Mouse_Erythrocytes","Mast_Cells","Mouse_Stromal_Cells","Mouse_Endothelial_Cells")
 
 names(broad_clustering) <- levels(humanized_mouse_spleen)
 humanized_mouse_spleen<- RenameIdents(humanized_mouse_spleen, broad_clustering)
@@ -890,32 +922,24 @@ Dotplot for the broad clustering
 ```{r,fig.height=20, fig.width=27}
 
 markers <- c(
-  # Cluster 0 - Cerebellar Granule Cells
-  "mm10-Gabra6", "mm10-Cbln1", "mm10-Cbln3", "mm10-Neurod1", "mm10-Barhl2",
-  # Cluster 1 - Excitatory Cortical Neurons (Glutamatergic)
-  "mm10-Tbr1", "mm10-Satb2", "mm10-Emx1", "mm10-Neurod6",
-  # Cluster 2 - GABAergic Interneurons (SST/VIP subtypes)
-  "mm10-Lhx6", "mm10-Lhx8", "mm10-Sst", "mm10-Vip", "mm10-Tac2", "mm10-Slc5a7", "mm10-Nxph2",
-  # Cluster 3 - GABAergic Inhibitory Neurons (Striatal/MGE-derived)
-  "mm10-Dlx1", "mm10-Dlx2", "mm10-Gad1", "mm10-Sp9", "mm10-Meis2", "mm10-Pbx3",
-  # Cluster 4 - Mature Oligodendrocytes
-  "mm10-Plp1", "mm10-Mbp", "mm10-Apod", "mm10-Ptgds",
-  # Cluster 5 - Astrocytes
-  "mm10-Atp1a2", "mm10-Slc1a3", "mm10-Apoe", "mm10-Gja1", "mm10-Gli1", "mm10-Mfge8",
-  # Cluster 6 - Medium Spiny Neurons (Striatal)
-  "mm10-Drd1", "mm10-Drd2", "mm10-Adora2a", "mm10-Gpr88", "mm10-Rgs9", "mm10-Rarb",
-  # Cluster 7 - Myelinating Oligodendrocytes
-  "mm10-Klk6", "mm10-Gjc2", "mm10-Ugt8a", "mm10-Gjb1",
-  # Cluster 8 - Cerebellar Inhibitory Interneurons (MLI/Pvalb+)
-  "mm10-Pvalb", "mm10-Pax2", "mm10-Kit", "mm10-Tfap2a", "mm10-Tfap2b", "mm10-Skor1",
-  # Cluster 9 - Microglia
-  "mm10-Tmem119", "mm10-Hexb", "mm10-Trem2", "mm10-Tyrobp", "mm10-Inpp5d", "mm10-Itgam", "mm10-Cd14", "mm10-Adgre1",
-  # Cluster 10 - Thalamic Neurons
-  "mm10-Synpo2", "mm10-Zfhx3", "mm10-Shox2", "mm10-Lef1", "mm10-Slitrk6",
-  # Cluster 11 - Oligodendrocyte Precursor Cells (OPCs)
-  "mm10-Pdgfra", "mm10-Cspg4", "mm10-Vcan",
-  # Cluster 12 - Purkinje Cells (Cerebellar)
-  "mm10-Car8", "mm10-Pcp2", "mm10-Ppp1r17", "mm10-Col18a1", "mm10-Atp2a3"
+  # C0 - Mixed human immune
+  "GRCh38-HLA-DRA", "GRCh38-LYZ", "GRCh38-APOE", "GRCh38-CD3D",
+  # C1 - Tissue-resident macrophages
+  "GRCh38-ITGAX", "GRCh38-NR1H3", "GRCh38-TFEC", "GRCh38-MSR1",
+  # C2 - CD4+ T cells
+  "GRCh38-BCL11B", "GRCh38-THEMIS", "GRCh38-CD247", "GRCh38-LEF1",
+  # C3 - Erythroid progenitors / red pulp Mac
+  "mm10-Ank1", "mm10-Mki67", "mm10-Gata1", "mm10-Spic",
+  # C4 - B cells / progenitors
+  "GRCh38-PAX5", "GRCh38-MS4A1", "GRCh38-EBF1", "GRCh38-BANK1",
+  # C5 - Mature erythrocytes
+  "mm10-Hba-a1", "mm10-Hbb-bs", "mm10-Car2", "mm10-Prdx2",
+  # C6 - Mast cells
+  "GRCh38-KIT", "GRCh38-CPA3", "GRCh38-HDC", "GRCh38-GATA2",
+  # C7 - Stromal (fibroblasts / FRC / SMC)
+  "mm10-Pdgfra", "mm10-Tshz2", "mm10-Col3a1", "mm10-Ccl19",
+  # C8 - Endothelial (BEC / LEC)
+  "mm10-Stab2", "mm10-Pecam1", "mm10-Egfl7", "mm10-Flt1"
 )
 
 p1 <- DotPlot(humanized_mouse_spleen, features = markers, group.by = "broad_clustering", cols = c("lightgrey", "firebrick")) +
@@ -2252,6 +2276,9 @@ plot_volcano <- function(res_df, cluster_label,
     mutate(label = ifelse(sig != "NS" & rank(padj, ties.method = "first") <= top_n,
                           gene, NA_character_))
 
+  n_up  <- sum(df$sig == "Up in EAE")
+  n_dn  <- sum(df$sig == "Up in CFA")
+
   ggplot(df, aes(x = log2FoldChange, y = -log10(padj), color = sig)) +
     geom_point(alpha = 0.6, size = 1.5) +
     ggrepel::geom_text_repel(aes(label = label), size = 3, max.overlaps = 20, na.rm = TRUE) +
@@ -2260,6 +2287,10 @@ plot_volcano <- function(res_df, cluster_label,
     ) +
     geom_vline(xintercept = c(-lfc_thresh, lfc_thresh), linetype = "dashed", colour = "grey40") +
     geom_hline(yintercept = -log10(padj_thresh),         linetype = "dashed", colour = "grey40") +
+    annotate("text", x = Inf,  y = Inf, hjust = 1.1, vjust = 1.5,
+             label = paste0("Up in EAE: ", n_up),  color = "firebrick",  size = 4.5, fontface = "bold") +
+    annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5,
+             label = paste0("Up in CFA: ", n_dn), color = "steelblue", size = 4.5, fontface = "bold") +
     labs(
       title = paste("EAE vs CFA –", cluster_label),
       x     = "log2 Fold Change (EAE / CFA)",
@@ -2314,7 +2345,13 @@ Volcano plots – whole-spleen harmony clusters
 ```{r, fig.height=6, fig.width=8}
 for (cl in names(dge_spleen_list)) {
   if (!is.null(dge_spleen_list[[cl]]) && sum(!is.na(dge_spleen_list[[cl]]$padj)) > 0) {
-    print(plot_volcano(dge_spleen_list[[cl]], paste("broad_clustering", cl)))
+    p <- plot_volcano(dge_spleen_list[[cl]], cl)
+    ggplot2::ggsave(
+      file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/",
+                paste0("volcano_DGE_", cl, "_spleen.png")),
+      p, width = 8, height = 6, dpi = 300
+    )
+    print(p)
   }
 }
 ```

@@ -2203,6 +2203,9 @@ plot_volcano <- function(res_df, cluster_label,
     mutate(label = ifelse(sig != "NS" & rank(padj, ties.method = "first") <= top_n,
                           gene, NA_character_))
 
+  n_up <- sum(df$sig == "Up in EAE")
+  n_dn <- sum(df$sig == "Up in CFA")
+
   ggplot(df, aes(x = log2FoldChange, y = -log10(padj), color = sig)) +
     geom_point(alpha = 0.6, size = 1.5) +
     ggrepel::geom_text_repel(aes(label = label), size = 3, max.overlaps = 20, na.rm = TRUE) +
@@ -2211,6 +2214,10 @@ plot_volcano <- function(res_df, cluster_label,
     ) +
     geom_vline(xintercept = c(-lfc_thresh, lfc_thresh), linetype = "dashed", colour = "grey40") +
     geom_hline(yintercept = -log10(padj_thresh),         linetype = "dashed", colour = "grey40") +
+    annotate("text", x = Inf,  y = Inf, hjust = 1.1, vjust = 1.5,
+             label = paste0("Up in EAE: ", n_up), color = "firebrick",  size = 4.5, fontface = "bold") +
+    annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5,
+             label = paste0("Up in CFA: ", n_dn), color = "steelblue", size = 4.5, fontface = "bold") +
     labs(
       title = paste("EAE vs CFA –", cluster_label),
       x     = "log2 Fold Change (EAE / CFA)",
@@ -2265,7 +2272,13 @@ Volcano plots – whole-brain harmony clusters
 ```{r, fig.height=6, fig.width=8}
 for (cl in names(dge_brain_list)) {
   if (!is.null(dge_brain_list[[cl]]) && sum(!is.na(dge_brain_list[[cl]]$padj)) > 0) {
-    print(plot_volcano(dge_brain_list[[cl]], paste("broad_clustering", cl)))
+    p <- plot_volcano(dge_brain_list[[cl]], cl)
+    ggplot2::ggsave(
+      file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/",
+                paste0("volcano_DGE_", cl, "_brain.png")),
+      p, width = 8, height = 6, dpi = 300
+    )
+    print(p)
   }
 }
 ```

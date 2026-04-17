@@ -2287,9 +2287,9 @@ plot_volcano <- function(res_df, cluster_label,
     ) +
     geom_vline(xintercept = c(-lfc_thresh, lfc_thresh), linetype = "dashed", colour = "grey40") +
     geom_hline(yintercept = -log10(padj_thresh),         linetype = "dashed", colour = "grey40") +
-    annotate("text", x = Inf,  y = Inf, hjust = 1.1, vjust = 1.5,
+    annotate("text", x = Inf,  y = Inf, hjust = 1.1, vjust = 1.1,
              label = paste0("Up in EAE: ", n_up),  color = "firebrick",  size = 4.5, fontface = "bold") +
-    annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5,
+    annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.1,
              label = paste0("Up in CFA: ", n_dn), color = "steelblue", size = 4.5, fontface = "bold") +
     labs(
       title = paste("EAE vs CFA –", cluster_label),

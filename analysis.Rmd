@@ -540,52 +540,15 @@ ggplot(df, aes(x = Cluster, y = Percent, fill = Batch)) +
 
 
 
-
-
-##3.2 Dimensionality reduction and clustering with data integration
-In this section the dimensionality reduction will be performed including data integration and SCT transformation which should make the dataset more homogeneus and prevent any differences that are not due to biological variation.
-
-1. SCT transformation, PCA running, clustering and dimensionality reduction again using 15 PCs as shown by the elbowplot above
+5.UMAP of the final clustering divided per phenotype (Fig.3f)
 
 ```{r}
-
-humanized_mouse_brain <- IntegrateLayers(
-  object = humanized_mouse_brain,
-  method = HarmonyIntegration,
-  orig.reduction = "pca_SCT", new.reduction = "harmony",
-  normalization.method = "SCT",
-  verbose = FALSE
-)
-humanized_mouse_brain <- FindNeighbors(humanized_mouse_brain, dims = 1:15, reduction = "harmony")
-humanized_mouse_brain <- FindClusters(humanized_mouse_brain, resolution = 0.1, cluster.name = "harmony_clusters")
-```
-
-2. Perform Dimensionality reduction
-```{r}
-humanized_mouse_brain <- RunUMAP(humanized_mouse_brain, dims = 1:15, reduction = "harmony", reduction.name = "umap.harmony")
-```
-
-3.Plot UMAP with clusters and sample to check that the data integration effectively results in a better homogeneus dataset 
-
-```{r}
+humanized_mouse_brain_CFA <- subset(humanized_mouse_brain, subset = orig.ident == "CFA")
+humanized_mouse_brain_EAE <- subset(humanized_mouse_brain, subset = orig.ident == "EAE")
 
 
-pal13 <- pals::glasbey(13)         # 13 very distinct colors
-pal13
-
-p1 <- DimPlot(humanized_mouse_brain, reduction = "umap.harmony", group.by = c("harmony_clusters"), cols = pal13) + labs(x = "UMAP 1", y = "UMAP 2") + theme_minimal() +
-  theme(
-    panel.grid.major = element_blank(),
-    panel.grid.minor = element_blank(),
-    axis.text.x = element_blank(),
-    axis.text.y = element_blank(),
-     plot.title = element_blank()
-
-  )
-
-
-p2 <- DimPlot(humanized_mouse_brain, reduction = "umap.harmony", group.by = c("sample")) + labs(x = "UMAP 1", y = "UMAP 2") +
-  ggtitle("") +  # Add your title here
+p1<-DimPlot(MOL_Tomato, reduction = "umap_MOL", group.by = c("MOL_fine_clustering"))+labs(x = "UMAP 1", y = "UMAP 2")+
+  ggtitle("Tomato") +  # Add your title here
  theme_minimal() +
   theme(
     plot.title = element_text(
@@ -603,15 +566,10 @@ p2 <- DimPlot(humanized_mouse_brain, reduction = "umap.harmony", group.by = c("s
     axis.text.y = element_blank()
   )
 
-col <- c(
-  mouse = "grey80",
-  human = "firebrick3"
-)
-
-
-p3 <- DimPlot(humanized_mouse_brain, reduction = "umap.SCT", group.by = c("species"), cols = col) + labs(x = "UMAP 1", y = "UMAP 2") +
-  ggtitle("") +  # Add your title here
- theme_minimal() +
+p2 <- DimPlot(MOL_fgf, reduction = "umap_MOL", group.by = "MOL_fine_clustering") +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("FGF") +
+  theme_minimal() +
   theme(
     plot.title = element_text(
       hjust = 0.5,
@@ -621,86 +579,24 @@ p3 <- DimPlot(humanized_mouse_brain, reduction = "umap.SCT", group.by = c("speci
     axis.title.x = element_text(size = 20),
     axis.title.y = element_text(size = 20),
     legend.text = element_text(size = 16),         # Legend labels
-    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    legend.title = element_text(size = 24),  # Legend title
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
     axis.text.x = element_blank(),
     axis.text.y = element_blank()
   )
-
+p<-p1+p2
+plots <- list(Fig.3f=p)
+for (nm in names(plots)) {
+ggplot2::ggsave(file.path("/date/gcb/gcb_MZ/MOL_FGF_10x/Plots/", paste0(nm, ".png")), plots[[nm]], width =16, height = 16, dpi = 300)
+}
 p1
 p2
-p3
+rm(MOL_fgf)
+rm(MOL_Tomato)
+gc()
 ```
 
-
-clusters proportions
-
-```{r}
-colors_vector <- c(
-  "CFA_brain_1" = "#E41A1C", 
-  "CFA_brain_2" = "#377EB8", 
-  "EAE_brain_1" = "#984EA3", 
-  "EAE_brain_2" = "#FF7F00", 
-  "EAE_brain_3" = "#FFFF33"
-)
-
-# Create the contingency table
-t <- table(Cluster=humanized_mouse_brain$harmony_clusters, Batch=humanized_mouse_brain@meta.data[["sample"]])
-t <- t[, rev(names(colors_vector))]
-
-# Convert the table to a data frame
-df <- as.data.frame(t)
-
-# Calculate the percentage of each plate within each cluster
-df <- df %>%
-  group_by(Cluster) %>% mutate(Percent = Freq / sum(Freq) * 100)
-
-# Plot the data
-ggplot(df, aes(x = Cluster, y = Percent, fill = Batch)) +
-  geom_bar(stat = "identity", position = "fill") +
-  scale_y_continuous(labels = percent_format(), expand = c(0, 0)) +
-  scale_fill_manual(values = rev(colors_vector)) +
-  theme_classic() +
-  theme(
-    axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 16),
-    axis.text.y = element_text(family = "Arial", size = 16),
-    axis.title.x = element_text(family = "Arial", size = 18),
-    axis.title.y = element_text(family = "Arial", size = 18),
-    legend.text = element_text(size = 16, family = "Arial"),
-    legend.title = element_text(size = 18, family = "Arial")
-  ) +
-  labs(y = "Percentage of cells", x = "Cluster", fill = "Animal") +
-  guides(fill = guide_legend(ncol = 3, title.position = "top", title.hjust = 0.5))
-```
-
-
-7.Compute and save cluster markers of the different population in the MOL subclustering. This will be one of the supplementary tables to be attached to be included. 
-
-```{r}
-
-# find markers for every cluster compared to all remaining cells, report only the positive
-# ones
-
-DefaultAssay(humanized_mouse_brain) <- "SCT"
-humanized_mouse_brain <- PrepSCTFindMarkers(humanized_mouse_brain, assay = "SCT", verbose = TRUE)
-humanized_mouse_brain_markers <- FindAllMarkers(humanized_mouse_brain, only.pos = TRUE)
-
-
- # Create a new workbook
-wb <- createWorkbook()
-
-# Loop through each cluster and add data to a new sheet
-for (cluster_value in unique(humanized_mouse_brain_markers$cluster)) {
-  cluster_data <- subset(humanized_mouse_brain_markers, cluster == cluster_value)
-  sheet_name <- paste0("Cluster_", cluster_value)
-  addWorksheet(wb, sheet_name)
-  writeData(wb, sheet_name, cluster_data)
-}
-
-# Save the workbook to a file
-saveWorkbook(wb, "/date/gcb/gcb_MZ/Humanized_mice_OD/Seurat_clusters_broad_brain.xlsx", overwrite = TRUE)
-```
 
 4.Now let's plot some markers genes to rename and homogenize clusters. After that the final steps of the analysis will be performed.The code use to generate the plots is used in the Supplementary Fig.S3C.
 
@@ -858,7 +754,7 @@ markers <- c(
   # Cluster 6 - Medium Spiny Neurons (Striatal)
   "mm10-Drd1", "mm10-Drd2", "mm10-Adora2a", "mm10-Gpr88", "mm10-Rgs9", "mm10-Rarb",
   # Cluster 7 - Myelinating Oligodendrocytes
-  "mm10-Klk6", "mm10-Gjc2", "mm10-Ugt8a", "mm10-Gjb1",
+  #"mm10-Klk6", "mm10-Gjc2", "mm10-Ugt8a", "mm10-Gjb1",
   # Cluster 8 - Cerebellar Inhibitory Interneurons (MLI/Pvalb+)
   "mm10-Pvalb", "mm10-Pax2", "mm10-Kit", "mm10-Tfap2a", "mm10-Tfap2b", "mm10-Skor1",
   # Cluster 9 - Microglia
@@ -898,7 +794,7 @@ With this line of code we will create a new Seurat object that will contain only
 
 
 
-OL <- subset(humanized_mouse_brain, idents = c("Myelin_MOL", "MOL", "OPcs"))
+OL <- subset(humanized_mouse_brain, idents = c("MOL", "OPcs"))
 
 
 ```
@@ -2214,9 +2110,9 @@ plot_volcano <- function(res_df, cluster_label,
     ) +
     geom_vline(xintercept = c(-lfc_thresh, lfc_thresh), linetype = "dashed", colour = "grey40") +
     geom_hline(yintercept = -log10(padj_thresh),         linetype = "dashed", colour = "grey40") +
-    annotate("text", x = Inf,  y = Inf, hjust = 1.1, vjust = 1.1,
+    annotate("text", x = Inf,  y = Inf, hjust = 1.1, vjust = 1.0,
              label = paste0("Up in EAE: ", n_up), color = "firebrick",  size = 4.5, fontface = "bold") +
-    annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.1,
+    annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.0,
              label = paste0("Up in CFA: ", n_dn), color = "steelblue", size = 4.5, fontface = "bold") +
     labs(
       title = paste("EAE vs CFA –", cluster_label),
@@ -2276,7 +2172,7 @@ for (cl in names(dge_brain_list)) {
     ggplot2::ggsave(
       file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/",
                 paste0("volcano_DGE_", cl, "_brain.png")),
-      p, width = 8, height = 6, dpi = 300
+      p, width = 8, height =6, dpi = 300
     )
     print(p)
   }
@@ -2546,4 +2442,475 @@ for (cl in cluster_ids_kegg) {
 
 
 
+##6. Label Transfer for MOL subset (mouse cells only)
 
+Label transfer is performed using three independent mouse oligodendrocyte reference
+datasets. Only mouse cells from the MOL subset are used as query so that gene names
+(mm10- prefix space) match the reference objects.
+
+```{r}
+MOL <- readRDS("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/objects/MOL_SCT.rds")
+DefaultAssay(OL) <- "RNA"
+OL[["RNA"]] <- JoinLayers(OL[["RNA"]])
+
+
+# Strip mm10- prefix so gene names match standard mouse references (Pandey, Zuchero)
+counts_lt <- GetAssayData(MOL, assay = "RNA", layer = "counts")
+rownames(counts_lt) <- gsub("^mm10-", "", rownames(counts_lt))
+MOL_lt <- CreateSeuratObject(counts = counts_lt, meta.data = MOL@meta.data)
+MOL_lt <- NormalizeData(MOL_lt)
+rm(counts_lt)
+```
+
+##6.1 Label transfer – Pandey et al. panDAO (Cell Reports, 2022)
+
+1. Perform label transfer
+
+```{r}
+# Load and capture the original object name
+loaded_name <- load("/date/gcb/gcb_MZ/MOL_FGF_10x/oligos_final_pub.RObj") #Pandey Dataset can be donwloaded from Zenodo
+
+# Assign it to DA_oligo using the captured name
+DA_oligo <- get(loaded_name[1])
+
+DA_oligo_v5 <- UpdateSeuratObject(object =DA_oligo)
+DA_oligo_v5@version
+
+DefaultAssay(DA_oligo_v5) <- "RNA"
+DefaultAssay(OL)          <- "RNA"
+
+# CCA needs scale.data on both
+DA_oligo_v5 <- NormalizeData(DA_oligo_v5) |>
+               FindVariableFeatures() |>
+               ScaleData()
+
+# 1. keep only the mouse-tagged genes
+mm_mask  <- grepl("^mm10-", rownames(OL))
+OL_mouse <- OL[mm_mask, ]
+
+# 2. pull raw counts and rename rows
+cts <- GetAssayData(OL_mouse, assay = "RNA", layer = "counts")
+rownames(cts) <- sub("^mm10-", "", rownames(cts))
+
+# 3. guard against duplicate names produced by stripping (rare but possible)
+dup <- duplicated(rownames(cts))
+if (any(dup)) {
+    message(sum(dup), " duplicate gene symbols after prefix stripping; collapsing by sum")
+    cts <- rowsum(as.matrix(cts), group = rownames(cts))
+}
+
+# 4. rebuild the Seurat object, carrying over cell metadata
+OL_clean <- CreateSeuratObject(
+    counts    = cts,
+    meta.data = OL_mouse@meta.data
+)
+DefaultAssay(OL_clean) <- "RNA"
+OL_clean <- NormalizeData(OL_clean) |>
+            FindVariableFeatures() |>
+            ScaleData()
+
+feats <- intersect(VariableFeatures(OL_clean), rownames(DA_oligo_v5))
+length(feats) 
+
+# 5. (optional) carry over any reductions / cell embeddings you want to keep
+ OL_clean[["umap"]] <- OL_mouse[["umap_OL"]]
+  
+transfer_anchors <- FindTransferAnchors(
+    reference       = DA_oligo_v5,
+    query           = OL_clean,
+    reference.assay = "RNA",
+    query.assay     = "RNA",
+    reduction       = "cca",
+    dims            = 1:50,
+    features        = feats
+)
+
+ OL_clean <- MapQuery(
+  anchorset =transfer_anchors, 
+  reference = DA_oligo_v5,
+  query =   OL_clean,
+  refdata = "finalInterps")
+#rename predictions columns 
+cn <- colnames( OL_clean@meta.data)
+cn[cn == "predicted.id"] <- "predicted.id_DA_oligo"
+cn[cn == "predicted.id.score"] <- "predicted.id.score_DA_oligo"
+colnames(OL_clean@meta.data) <- cn
+```
+
+2. UMAP colored by predicted label
+
+```{r, fig.height=8, fig.width=12}
+colors <- c(
+  "#0072B2", "#E69F00", "green", "#D55E00", "#CC79A7",
+  "red", "#F0E442", "#000000", "#332288", "#88CCEE",
+  "#44AA99", "#117733", "#999933", "#DDCC77", "#661100",
+  "#AA4499", "#882255"
+)
+
+p1 <- DimPlot(OL_clean, reduction = "umap", group.by = "predicted.id_DA_oligo", cols = colors) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("Pandey panDAO – predicted labels") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 24),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+my_colors <- c(
+  "#1F77B4",
+  "#FF7F0E",
+  "#2CA02C",
+  "#D62728",
+  "#9467BD",
+  "#8C564B",
+  "#17BECF"
+)
+
+p2 <- DimPlot(OL_clean, reduction = "umap", group.by = c("OL_clusters"), cols = my_colors) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with new clustering
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+
+p1
+p2
+```
+
+3. Violin plots of similarity scores per OL cluster
+
+```{r, fig.height=12, fig.width=24}
+clusters <- unique(OL_clean$OL_clusters)
+
+for (cluster_id in clusters) {
+  all_scores <- data.frame()
+  assay_data <- GetAssayData(OL_clean, assay = "prediction.score.id",   layer = "data")
+  cluster_cells <- colnames(OL_clean)[OL_clean$OL_clusters == cluster_id]
+
+  for (ref_celltype in rownames(assay_data)) {
+    scores <- assay_data[ref_celltype, cluster_cells]
+    all_scores <- rbind(all_scores, data.frame(
+      score = as.numeric(scores),
+      reference_celltype = ref_celltype,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  p <- ggplot(all_scores, aes(x = reference_celltype, y = score, fill = reference_celltype)) +
+    geom_violin(trim = TRUE, scale = "width") +
+    geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+    ggtitle(paste("Cluster:", cluster_id)) +
+    xlab("Reference Cell Type") +
+    ylab("Similarity Score") +
+    ylim(0, 1) +
+    theme_classic() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 36, face = "bold"),
+      axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 14, angle = 90),
+      axis.text.y = element_text(family = "Arial", size = 20),
+      axis.title.x = element_text(family = "Arial", size = 24, face = "bold"),
+      axis.title.y = element_text(family = "Arial", size = 24, face = "bold"),
+      legend.position = "none"
+    )
+  print(p)
+  #ggplot2::ggsave(file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/",
+                             #paste0("Similarity_DA_oligo_cluster_", cluster_id, ".png")),
+                  #p, width = 24, height = 12, dpi = 300)
+}
+```
+
+##6.2 Label transfer – Zuchero EAE dataset (Nature Medicine, 2018)
+
+1. Perform label transfer
+
+```{r}
+EAE_Oligo <- readRDS("/date/gcb/gcb_MZ/MOL_FGF_10x/EAE_SS2_NatMed2018_seuratv5.rds")
+
+DefaultAssay(EAE_Oligo) <- "RNA"
+
+
+transfer_anchors <- FindTransferAnchors(
+    reference       = EAE_Oligo,
+    query           = OL_clean,
+    reference.assay = "RNA",
+    query.assay     = "RNA",
+    reduction       = "cca",
+    dims            = 1:50,
+    features        = feats
+)
+
+ OL_clean <- MapQuery(
+  anchorset =transfer_anchors, 
+  reference = EAE_Oligo,
+  query =   OL_clean,
+  refdata = "Renamed_clusternames")
+
+# Rename prediction columns
+cn <- colnames(OL_clean@meta.data)
+cn[cn == "predicted.id"]       <- "predicted.id_EAE_oligo"
+cn[cn == "predicted.id.score"] <- "predicted.id.score_EAE_oligo"
+colnames(OL_clean@meta.data) <- cn
+
+rm(EAE_Oligo)
+gc()
+```
+
+2. UMAP colored by predicted label
+
+```{r, fig.height=8, fig.width=14}
+colors <- c(
+  "#A6CEE3", "#1F78B4", "#B2DF8A", "#33A02C", "black", "#E31A1C",
+  "#FDBF6F", "#FF7F00", "#CAB2D6", "#6A3D9A", "#FFFF99", "#B15928",
+  "#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3", "gold",
+  "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD", "#CCEBC5"
+)
+
+p1 <- DimPlot(OL_clean, reduction = "umap", group.by = "predicted.id_EAE_oligo", cols = colors) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("Humanized mice vs Spinal cord EAE – predicted labels") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 24),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+
+my_colors <- c(
+  "#1F77B4",
+  "#FF7F0E",
+  "#2CA02C",
+  "#D62728",
+  "#9467BD",
+  "#8C564B",
+  "#17BECF"
+)
+
+
+p2 <- DimPlot(OL_clean, reduction = "umap", group.by = c("OL_clusters"), cols = my_colors) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with new clustering
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+
+p1
+p2
+```
+
+3. Violin plots of similarity scores per OL cluster
+
+```{r, fig.height=12, fig.width=24}
+clusters <- unique(OL_clean$OL_clusters)
+
+for (cluster_id in clusters) {
+  all_scores <- data.frame()
+  assay_data <- GetAssayData(OL_clean, assay = "prediction.score.id", layer = "data")
+  cluster_cells <- colnames(OL_clean)[OL_clean$OL_clusters == cluster_id]
+
+  for (ref_celltype in rownames(assay_data)) {
+    scores <- assay_data[ref_celltype, cluster_cells]
+    all_scores <- rbind(all_scores, data.frame(
+      score = as.numeric(scores),
+      reference_celltype = ref_celltype,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  p <- ggplot(all_scores, aes(x = reference_celltype, y = score, fill = reference_celltype)) +
+    geom_violin(trim = TRUE, scale = "width") +
+    geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+    ggtitle(paste("Cluster:", cluster_id)) +
+    xlab("Reference Cell Type") +
+    ylab("Similarity Score") +
+    ylim(0, 1) +
+    theme_classic() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 36, face = "bold"),
+      axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 14, angle = 90),
+      axis.text.y = element_text(family = "Arial", size = 20),
+      axis.title.x = element_text(family = "Arial", size = 24, face = "bold"),
+      axis.title.y = element_text(family = "Arial", size = 24, face = "bold"),
+      legend.position = "none"
+    )
+  print(p)
+  #ggplot2::ggsave(file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/",
+                             #paste0("Similarity_EAE_oligo_cluster_", cluster_id, ".png")),
+                  #p, width = 24, height = 12, dpi = 300)
+}
+```
+
+
+##6.3 Label transfer – Absinta 
+
+1. Perform label transfer
+
+```{r}
+Human_MS <- readRDS("/date/gcb/gcb_MZ/MOL_FGF_10x/ms_lesions_MM10orthologs_snRNAseq_seuratV5_WMEA_updated_WMOLGdown3K.rds")
+
+DefaultAssay(Human_MS) <- "RNA"
+
+
+transfer_anchors <- FindTransferAnchors(
+    reference       = Human_MS,
+    query           = OL_clean,
+    reference.assay = "RNA",
+    query.assay     = "RNA",
+    reduction       = "cca",
+    dims            = 1:50,
+    features        = feats
+)
+
+ OL_clean <- MapQuery(
+  anchorset =transfer_anchors, 
+  reference = Human_MS,
+  query =   OL_clean,
+  refdata = "type_fine")
+
+# Rename prediction columns
+cn <- colnames(OL_clean@meta.data)
+cn[cn == "predicted.id"]       <- "predicted.id_Human_MS"
+cn[cn == "predicted.id.score"] <- "predicted.id.score_Human_MS"
+colnames(OL_clean@meta.data) <- cn
+
+```
+
+2. UMAP colored by predicted label
+
+```{r, fig.height=8, fig.width=14}
+colors <- c(
+  "#A6CEE3", "#1F78B4", "#B2DF8A", "#33A02C", "black", "#E31A1C",
+  "#FDBF6F", "#FF7F00", "#CAB2D6", "#6A3D9A", "#FFFF99", "#B15928",
+  "#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3", "gold",
+  "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD", "#CCEBC5"
+)
+
+p1 <- DimPlot(OL_clean, reduction = "umap", group.by = "predicted.id_Human_MS", cols = colors) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("Humanized mice vs Human MS – predicted labels") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 24),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+
+my_colors <- c(
+  "#1F77B4",
+  "#FF7F0E",
+  "#2CA02C",
+  "#D62728",
+  "#9467BD",
+  "#8C564B",
+  "#17BECF"
+)
+
+
+p2 <- DimPlot(OL_clean, reduction = "umap", group.by = c("OL_clusters"), cols = my_colors) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with new clustering
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+
+p1
+p2
+```
+
+
+3. Violin plots of similarity scores per OL cluster
+
+```{r, fig.height=12, fig.width=24}
+clusters <- unique(OL_clean$OL_clusters)
+
+for (cluster_id in clusters) {
+  all_scores <- data.frame()
+  assay_data <- GetAssayData(OL_clean, assay = "prediction.score.id", layer = "data")
+  cluster_cells <- colnames(OL_clean)[OL_clean$OL_clusters == cluster_id]
+
+  for (ref_celltype in rownames(assay_data)) {
+    scores <- assay_data[ref_celltype, cluster_cells]
+    all_scores <- rbind(all_scores, data.frame(
+      score = as.numeric(scores),
+      reference_celltype = ref_celltype,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  p <- ggplot(all_scores, aes(x = reference_celltype, y = score, fill = reference_celltype)) +
+    geom_violin(trim = TRUE, scale = "width") +
+    geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+    ggtitle(paste("Cluster:", cluster_id)) +
+    xlab("Reference Cell Type") +
+    ylab("Similarity Score") +
+    ylim(0, 1) +
+    theme_classic() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 36, face = "bold"),
+      axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 14, angle = 90),
+      axis.text.y = element_text(family = "Arial", size = 20),
+      axis.title.x = element_text(family = "Arial", size = 24, face = "bold"),
+      axis.title.y = element_text(family = "Arial", size = 24, face = "bold"),
+      legend.position = "none"
+    )
+  print(p)
+  #ggplot2::ggsave(file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/",
+                             #paste0("Similarity_EAE_oligo_cluster_", cluster_id, ".png")),
+                  #p, width = 24, height = 12, dpi = 300)
+}
+```

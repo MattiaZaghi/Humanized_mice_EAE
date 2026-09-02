@@ -57,6 +57,6 @@ general:                                               # Modify path to a tmp fo
   # CellBender parameters
   cellbender_fpr: 0.01  # False positive rate
   cellbender_cuda: true  # Set to false if GPU not available
-  cellbender_epochs: 300  # Number of epochs for training
+  cellbender_epochs: 150  # Number of epochs for training
 
 

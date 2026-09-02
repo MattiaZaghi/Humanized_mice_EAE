@@ -1,0 +1,92 @@
+samples:
+  CFA_Brain_1:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/CFA_Brain_1/
+    barcodes:
+      RNA: AAAAGGGG
+  CFA_Brain_2:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/CFA_Brain_2/
+    barcodes:
+      RNA: AAAAGGGG
+  CFA_Brain_3:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/CFA_Brain_3/
+    barcodes:
+      RNA: AAAAGGGG
+  CFA_Meninges_1:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/CFA_Meninges_1/
+    barcodes:
+      RNA: AAAAGGGG
+  CFA_Meninges_2:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/CFA_Meninges_2/
+    barcodes:
+      RNA: AAAAGGGG
+  CFA_Meninges_3:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/CFA_Meninges_3/
+    barcodes:
+      RNA: AAAAGGGG
+  CFA_Spleen_1:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/CFA_Spleen_1/
+    barcodes:
+      RNA: AAAAGGGG
+  CFA_Spleen_2:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/CFA_Spleen_2/
+    barcodes:
+      RNA: AAAAGGGG
+  CFA_Spleen_3:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/CFA_Spleen_3/
+    barcodes:
+      RNA: AAAAGGGG
+  EAE-NonSymp_Brain_1:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/EAE-NonSymp_Brain_1/
+    barcodes:
+      RNA: AAAAGGGG
+  EAE-NonSymp_Brain_2:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/EAE-NonSymp_Brain_2/
+    barcodes:
+      RNA: AAAAGGGG
+  EAE-NonSymp_Brain_3:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/EAE-NonSymp_Brain_3/
+    barcodes:
+      RNA: AAAAGGGG
+  EAE-NonSymp_Meninges_1:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/EAE-NonSymp_Meninges_1/
+    barcodes:
+      RNA: AAAAGGGG
+  EAE-NonSymp_Meninges_2:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/EAE-NonSymp_Meninges_2/
+    barcodes:
+      RNA: AAAAGGGG
+  EAE-NonSymp_Meninges_3:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/EAE-NonSymp_Meninges_3/
+    barcodes:
+      RNA: AAAAGGGG
+  EAE-NonSymp_Spleen_1:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/EAE-NonSymp_Spleen_1/
+    barcodes:
+      RNA: AAAAGGGG
+  EAE-NonSymp_Spleen_2:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/EAE-NonSymp_Spleen_2/
+    barcodes:
+      RNA: AAAAGGGG
+  EAE-NonSymp_Spleen_3:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/EAE-NonSymp_Spleen_3/
+    barcodes:
+      RNA: AAAAGGGG
+  EAE-Symp_Brain_1:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/EAE-Symp_Brain_1/
+    barcodes:
+      RNA: AAAAGGGG
+  EAE-Symp_Meninges_1:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/EAE-Symp_Meninges_1/
+    barcodes:
+      RNA: AAAAGGGG
+  EAE-Symp_Spleen_1:
+    fastq_path_RNA: /ws/gcb/MZ/Humanized_mice_OD/Raw_data/CD45/EAE-Symp_Spleen_1/
+    barcodes:
+      RNA: AAAAGGGG
+
+general:
+  cellranger_software_RNA: /home/mattia/cellranger-9.0.1/bin/cellranger
+  cellranger_ref_RNA: /date/gcb/gcb_MZ/refdata-gex-GRCh38-and-mm10-2020-A/
+  cellbender_fpr: 0.01
+  cellbender_cuda: true
+  cellbender_epochs: 150

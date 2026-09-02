@@ -2616,5 +2616,172 @@ for (cl in cluster_ids_kegg) {
 
 ```
 
+label transfer with Läderach et al., Nature, 2025
 
+
+```{r}
+Bcell_EBV <- readRDS("/date/gcb/gcb_MZ/Humanized_mice_OD/reference_datasets/spleen_brain_B_cells_seurat_object.rds")
+
+humanized_mouse_spleen_B_cells<- subset(humanized_mouse_spleen, idents = c("B_Cells_prog"))  
+
+DefaultAssay(Bcell_EBV) <- "RNA"
+
+Bcell_EBV <- NormalizeData(Bcell_EBV) |>
+            FindVariableFeatures() |>
+            ScaleData()
+
+# 1. keep only the mouse-tagged genes
+hg_mask  <- grepl("^GRCh38-", rownames(humanized_mouse_spleen_B_cells))
+humanized_mouse_spleen_B_cells <- humanized_mouse_spleen_B_cells[hg_mask, ]
+
+# 2. pull raw counts and rename rows
+cts <- GetAssayData(humanized_mouse_spleen_B_cells, assay = "RNA", layer = "counts")
+rownames(cts) <- sub("^GRCh38-", "", rownames(cts))
+
+# 3. guard against duplicate names produced by stripping (rare but possible)
+dup <- duplicated(rownames(cts))
+if (any(dup)) {
+    message(sum(dup), " duplicate gene symbols after prefix stripping; collapsing by sum")
+    cts <- rowsum(as.matrix(cts), group = rownames(cts))
+}
+
+# 4. rebuild the Seurat object, carrying over cell metadata
+humanized_mouse_spleen_B_cells <- CreateSeuratObject(
+    counts    = cts,
+    meta.data = humanized_mouse_spleen_B_cells@meta.data
+)
+DefaultAssay(humanized_mouse_spleen_B_cells) <- "RNA"
+humanized_mouse_spleen_B_cells <- NormalizeData(humanized_mouse_spleen_B_cells) |>
+            FindVariableFeatures() |>
+            ScaleData() |>  RunPCA(reduction.name = "pca_lognorm")|>  
+FindNeighbors(dims = 1:15, reduction = "pca_lognorm")|> FindClusters(resolution = 0.1, cluster.name = "lognorm_clusters")|> 
+  RunUMAP(dims = 1:15, reduction = "pca_lognorm", reduction.name = "umap.Bcells_lognorm")
+
+feats <- intersect(VariableFeatures(humanized_mouse_spleen_B_cells), rownames(Bcell_EBV))
+
+length(feats) 
+
+transfer_anchors <- FindTransferAnchors(
+    reference       = Bcell_EBV,
+    query           = humanized_mouse_spleen_B_cells,
+    reference.assay = "RNA",
+    query.assay     = "RNA",
+    reduction       = "cca",
+    dims            = 1:50,
+    features        = feats
+)
+
+humanized_mouse_spleen_B_cells <- MapQuery(
+  anchorset =transfer_anchors, 
+  reference = Bcell_EBV,
+  query =   humanized_mouse_spleen_B_cells,
+  refdata = "predicted.id")
+
+# Rename prediction columns
+cn <- colnames(humanized_mouse_spleen_B_cells@meta.data)
+cn[cn == "predicted.id"]       <- "predicted.id_Bcells"
+cn[cn == "predicted.id.score"] <- "predicted.id.score_Bcells"
+colnames(humanized_mouse_spleen_B_cells@meta.data) <- cn
+```
+
+2. UMAP colored by predicted label
+
+```{r, fig.height=8, fig.width=12}
+colors <- c(
+  "#0072B2", "#E69F00", "green", "#D55E00", "#CC79A7",
+  "red", "#F0E442", "#000000", "#332288", "#88CCEE",
+  "#44AA99", "#117733", "#999933", "#DDCC77", "#661100",
+  "#AA4499", "#882255"
+)
+
+p1 <- DimPlot(humanized_mouse_spleen_B_cells, reduction = "umap.Bcells_lognorm", group.by = "predicted.id_Bcells", cols = colors) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  ggtitle("Laderäch et al. – predicted labels") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 24),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+my_colors <- c(
+  "#1F77B4",
+  "#FF7F0E",
+  "#2CA02C",
+  "#D62728",
+  "#9467BD",
+  "#8C564B",
+  "#17BECF"
+)
+
+p2 <- DimPlot(humanized_mouse_spleen_B_cells, reduction = "umap.Bcells_lognorm", group.by = c("lognorm_clusters"), cols = my_colors) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with new clustering
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+
+p1
+p2
+```
+
+
+3. Violin plots of similarity scores per OL cluster
+
+```{r, fig.height=12, fig.width=24}
+clusters <- unique(humanized_mouse_spleen_B_cells$lognorm_clusters)
+
+for (cluster_id in clusters) {
+  all_scores <- data.frame()
+  assay_data <- GetAssayData(humanized_mouse_spleen_B_cells, assay = "prediction.score.id",   layer = "data")
+  cluster_cells <- colnames(humanized_mouse_spleen_B_cells)[humanized_mouse_spleen_B_cells$lognorm_clusters == cluster_id]
+
+  for (ref_celltype in rownames(assay_data)) {
+    scores <- assay_data[ref_celltype, cluster_cells]
+    all_scores <- rbind(all_scores, data.frame(
+      score = as.numeric(scores),
+      reference_celltype = ref_celltype,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  p <- ggplot(all_scores, aes(x = reference_celltype, y = score, fill = reference_celltype)) +
+    geom_violin(trim = TRUE, scale = "width") +
+    geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+    ggtitle(paste("Cluster:", cluster_id)) +
+    xlab("Reference Cell Type") +
+    ylab("Similarity Score") +
+    ylim(0, 1) +
+    theme_classic() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 42, face = "bold"),
+      axis.text.x = element_text(hjust = 1, vjust = 0.5, family = "Arial", size = 20, angle = 90),
+      axis.text.y = element_text(family = "Arial", size = 28),
+      axis.title.x = element_text(family = "Arial", size = 32, face = "bold"),
+      axis.title.y = element_text(family = "Arial", size = 32, face = "bold"),
+      legend.position = "none"
+    )
+  print(p)
+  #ggplot2::ggsave(file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/Plots/",
+                             #paste0("Similarity_DA_oligo_cluster_", cluster_id, ".png")),
+                  #p, width = 24, height = 12, dpi = 300)
+}
+```
 

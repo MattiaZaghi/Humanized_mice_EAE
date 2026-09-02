@@ -42,6 +42,10 @@ library(patchwork)
 library(pals)
 library(knitr)
 library(DoubletFinder)
+library(ggpubr)
+library(patchwork)
+library(rstatix)
+library(pheatmap)
 opts_knit$set(root.dir = "/date/gcb/gcb_MZ/Humanized_mice_OD/")# change accordingly
 
 #source("/home/mattia/FGF_signaling_induces_disease-associated_humanized_mouse_braindendrocytes/functions.R")
@@ -2508,8 +2512,8 @@ DefaultAssay(OL_clean) <- "RNA"
 OL_clean <- NormalizeData(OL_clean) |>
             FindVariableFeatures() |>
             ScaleData()
-
 feats <- intersect(VariableFeatures(OL_clean), rownames(DA_oligo_v5))
+
 length(feats) 
 
 # 5. (optional) carry over any reductions / cell embeddings you want to keep
@@ -2914,3 +2918,474 @@ for (cluster_id in clusters) {
                   #p, width = 24, height = 12, dpi = 300)
 }
 ```
+
+
+
+Gene module scores from Falcao, Pandey, McNair, Absinta
+
+
+first we load the helper function
+
+```{r}
+
+# --- Prefix-aware feature matching ----------------------------------------
+# Genes in the Seurat object are prefixed with "mm10-" (mouse) or "GRCh38-" (human).
+# Given a vector of bare symbols, return the matching features in the object.
+match_features <- function(seurat_obj, genes, species = "mouse", assay = "RNA") {
+  feats <- rownames(seurat_obj[[assay]])
+  out <- c()
+  if (species %in% c("mouse", "both")) {
+    # Capitalise first letter only -> mouse-style symbol
+    g_mm <- paste0(toupper(substr(genes, 1, 1)),
+                   tolower(substr(genes, 2, nchar(genes))))
+    out <- c(out, intersect(paste0("mm10-", g_mm), feats))
+  }
+  if (species %in% c("human", "both")) {
+    out <- c(out, intersect(paste0("GRCh38-", toupper(genes)), feats))
+  }
+  unique(out)
+}
+
+# --- AddModuleScore wrapper -----------------------------------------------
+# Scores a signature on the object and stores it as a clean metadata column.
+score_signature <- function(seurat_obj, genes, name,
+                            species = "mouse", assay = "RNA", ctrl = 50) {
+  feats <- match_features(seurat_obj, genes, species, assay)
+  message(sprintf("'%s' (%s): %d / %d genes matched",
+                  name, species, length(feats), length(genes)))
+  if (length(feats) < 3) {
+    warning(sprintf("Skipping '%s' - <3 genes matched.", name))
+    seurat_obj[[name]] <- NA_real_
+    return(seurat_obj)
+  }
+  seurat_obj <- AddModuleScore(seurat_obj, features = list(feats),
+                               name = name, assay = assay, ctrl = ctrl)
+  # AddModuleScore appends "1" to the name - rename to a clean column
+  seurat_obj@meta.data[[name]] <- seurat_obj@meta.data[[paste0(name, "1")]]
+  seurat_obj@meta.data[[paste0(name, "1")]] <- NULL
+  seurat_obj
+}
+
+# =============================================================================
+# 2. FILE-FORMAT-SPECIFIC LOADERS
+# =============================================================================
+
+# Loader 1: LONG format Seurat FindAllMarkers output (Absinta 2021)
+# Columns: p_val, avg_logFC, pct.1, pct.2, p_val_adj, cluster, gene
+# Row 1 is a title row that must be skipped (skip_rows = 1).
+load_markers_long <- function(path, sheet, cluster_map = NULL,
+                              padj_max = 0.05, logfc_min = 0.25,
+                              top_n = NULL, skip_rows = 1) {
+  df <- read_excel(path, sheet = sheet, skip = skip_rows)
+  colnames(df) <- tolower(colnames(df))
+  fc_col <- intersect(c("avg_logfc", "avg_log2fc"), colnames(df))[1]
+  stopifnot(!is.na(fc_col),
+            "gene" %in% colnames(df),
+            "cluster" %in% colnames(df))
+  if (!"p_val_adj" %in% colnames(df)) df$p_val_adj <- NA_real_
+
+  # Rename via base R to avoid !! on character strings
+  colnames(df)[colnames(df) == fc_col] <- "logfc"
+
+  df <- df %>%
+    filter(!is.na(gene), !is.na(cluster)) %>%
+    filter(is.na(p_val_adj) | p_val_adj <= padj_max) %>%
+    filter(logfc >= logfc_min)
+
+  df$cluster <- as.character(df$cluster)
+  if (!is.null(cluster_map)) {
+    df <- df %>% filter(cluster %in% names(cluster_map))
+    df$cluster <- unname(cluster_map[df$cluster])
+  }
+  if (!is.null(top_n)) {
+    df <- df %>%
+      group_by(cluster) %>%
+      slice_max(logfc, n = top_n, with_ties = FALSE) %>%
+      ungroup()
+  }
+  split(df$gene, df$cluster) %>%
+    lapply(function(x) unique(na.omit(as.character(x))))
+}
+
+# Loader 2: WIDE format with one FC column per cluster (Falcão 2018 DE sheets)
+load_markers_wide <- function(path, sheet, fc_min = 5, top_n = 100,
+                              cluster_map = NULL, skip_rows = 0) {
+  df <- read_excel(path, sheet = sheet, skip = skip_rows)
+  colnames(df)[1] <- "gene"
+  df <- df %>% filter(!is.na(gene))
+  num_cols <- names(df)[-1][sapply(df[-1], is.numeric)]
+
+  out <- lapply(num_cols, function(cl) {
+    df %>% select(gene, value = all_of(cl)) %>%
+      filter(!is.na(value), value >= fc_min) %>%
+      arrange(desc(value)) %>%
+      slice_head(n = top_n) %>%
+      pull(gene) %>% unique()
+  })
+  names(out) <- num_cols
+
+  if (!is.null(cluster_map)) {
+    keep <- intersect(names(cluster_map), names(out))
+    out <- out[keep]
+    names(out) <- cluster_map[keep]
+  }
+  out[sapply(out, length) > 0]
+}
+
+# Loader 3: NNMF / module-loading matrices (Falcão 2018 GenemodulesNNMF)
+load_modules <- function(path, sheet, modules = NULL, top_n = 100,
+                         min_loading = NULL, skip_rows = 0) {
+  df <- read_excel(path, sheet = sheet, skip = skip_rows)
+  colnames(df)[1] <- "gene"
+  df <- df %>% filter(!is.na(gene))
+  mod_cols <- names(df)[-1][sapply(df[-1], is.numeric)]
+  if (!is.null(modules)) mod_cols <- intersect(as.character(modules), mod_cols)
+
+  out <- lapply(mod_cols, function(m) {
+    sub <- df %>% select(gene, value = all_of(m)) %>%
+      filter(!is.na(value)) %>% arrange(desc(value))
+    if (!is.null(min_loading)) sub <- sub %>% filter(value >= min_loading)
+    sub %>% slice_head(n = top_n) %>% pull(gene) %>% unique()
+  })
+  names(out) <- paste0("module_", mod_cols)
+  out[sapply(out, length) > 0]
+}
+
+# Loader 4: PANDEY format - single wide sheet with PAIRED LogFC/FDR columns.
+# signature_defs is a named list of list(logfc=..., fdr=..., direction=...).
+load_markers_paired <- function(path, sheet, signature_defs,
+                                gene_col = "symbol",
+                                logfc_min = 1, fdr_max = 0.05,
+                                top_n = 100, skip_rows = 1) {
+  df <- read_excel(path, sheet = sheet, skip = skip_rows)
+  stopifnot(gene_col %in% colnames(df))
+  out <- lapply(signature_defs, function(s) {
+    direction <- if (is.null(s$direction)) "up" else s$direction
+    sub <- df %>% select(gene = all_of(gene_col),
+                         lfc  = all_of(s$logfc),
+                         fdr  = all_of(s$fdr)) %>%
+      filter(!is.na(gene), !is.na(lfc), !is.na(fdr), fdr <= fdr_max)
+    sub <- if (direction == "up")
+      sub %>% filter(lfc >=  logfc_min) %>% arrange(desc(lfc))
+    else
+      sub %>% filter(lfc <= -logfc_min) %>% arrange(lfc)
+    sub %>% slice_head(n = top_n) %>% pull(gene) %>% unique()
+  })
+  out[sapply(out, length) > 0]
+}
+
+# Loader 5: McNAIR format - one sheet per cluster, sheet name = cluster name.
+# Per-sheet columns: symbol, is_marker, log2fc, FDR, ...
+load_markers_per_sheet <- function(path, sheets = NULL,
+                                   gene_col = "symbol",
+                                   marker_col = "is_marker",
+                                   logfc_col = "log2fc",
+                                   fdr_col = "FDR",
+                                   logfc_min = 1, fdr_max = 0.05,
+                                   require_marker = TRUE,
+                                   top_n = 100) {
+  all_sheets <- excel_sheets(path)
+  if (is.null(sheets)) sheets <- all_sheets
+  sheets <- intersect(sheets, all_sheets)
+
+  out <- lapply(sheets, function(s) {
+    df <- suppressMessages(read_excel(path, sheet = s))
+    needed <- c(gene_col, logfc_col, fdr_col)
+    if (!all(needed %in% colnames(df))) return(NULL)
+
+    if (require_marker && marker_col %in% colnames(df)) {
+      df <- df[df[[marker_col]] %in% c(TRUE, "TRUE", "True", 1), , drop = FALSE]
+    }
+
+    df <- df %>% as_tibble() %>%
+      filter(
+        !is.na(.data[[gene_col]]),
+        !is.na(.data[[logfc_col]]),
+        !is.na(.data[[fdr_col]]),
+        .data[[fdr_col]]  <= fdr_max,
+        .data[[logfc_col]] >= logfc_min
+      ) %>%
+      arrange(desc(.data[[logfc_col]])) %>%
+      slice_head(n = top_n)
+
+    unique(df[[gene_col]])
+  })
+
+  names(out) <- sheets
+  out[!sapply(out, is.null) & sapply(out, length) > 0]
+}
+```
+
+
+
+Load all signature files
+
+```{r}
+
+# =============================================================================
+# 3. LOAD ALL FOUR PAPERS - OL LINEAGE ONLY
+# =============================================================================
+sig_dir <- "/date/gcb/gcb_MZ/Humanized_mice_OD/signatures/"   # files sit in the project root
+
+# ---- PANDEY 2022 (all signatures here are MOL-related) -------------------
+pandey_defs <- list(
+  Pandey_DA2_mol56  = list(logfc = "LogFC_mol56DA2_vs_mol56",
+                           fdr   = "FDR_mol56DA2_vs_mol56",  direction = "up"),
+  Pandey_DA1_mol56  = list(logfc = "LogFC_mol56DA1_vs_mol56",
+                           fdr   = "FDR_mol56DA1_vs_mol56",  direction = "up"),
+  Pandey_IFN_OL     = list(logfc = "LogFC_mol56IFN_m56",
+                           fdr   = "FDR_mol56IFN_m56",       direction = "up"),
+  Pandey_DA1_mol2   = list(logfc = "LogFC_mol2da1_vs_mol2",
+                           fdr   = "FDR_mol2da1_vs_mol2",    direction = "up"),
+  Pandey_DAO_coarse = list(logfc = "LogFC", fdr = "FDR",     direction = "up")
+)
+pandey <- load_markers_paired(
+  file.path(sig_dir, "pandey_2022.xlsx"),
+  sheet = "TableS2",
+  signature_defs = pandey_defs,
+  gene_col = "symbol",
+  logfc_min = 1, fdr_max = 0.05, top_n = 100,
+  skip_rows = 1
+)
+
+# ---- McNAIR 2024/25 (OPC + Oligo sheets only) ----------------------------
+mcnair_ol_sheets <- c(
+  "OPC_1", "OPC_2", "COP",
+  "Oligo_A", "Oligo_B", "Oligo_C", "Oligo_D",
+  "Oligo_E", "Oligo_F", "Oligo_G"
+)
+mcnair_ol <- load_markers_per_sheet(
+  file.path(sig_dir, "mcnair_2024.xlsx"),
+  sheets = mcnair_ol_sheets,
+  logfc_min = 1, fdr_max = 0.05, top_n = 100
+)
+names(mcnair_ol) <- paste0("McNair_", names(mcnair_ol))
+
+# ---- ABSINTA 2021 (OL = S5, OPC = S6) ------------------------------------
+# These cluster_maps are PLACEHOLDERS. Check Fig. 3-4 of Absinta et al. 2021
+# and rename to the labels the authors actually use, especially the
+# disease-associated OL/OPC clusters.
+absinta_ol_map <- c(
+  "0" = "Oligo_A",
+  "1" = "Oligo_B",
+  "2" = "Oligo_C",
+  "3" = "Oligo_Stress",   # HSPH1, HSPD1, FOS — clear UPR/heat-shock signature
+  "4" = "Oligo_D",
+  "5" = "Oligo_Imm",      # OPCML, DSCAM, NRXN1 — immature/remyelinating-like
+  "6" = "Oligo_Mito",     # MT-ND3, MT-CO2, MT-CO3 — mitochondria-dominated
+  "7" = "DA_Oligo"        # LINGO1, HSP90AA1, NEAT1 — LINGO1 marks failed remyelination
+)
+
+absinta_opc_map <- c(
+  "0" = "OPC_A",
+  "1" = "Stressed_OPC",   # HSP90AA1, HMGCS1 — stress + cholesterol biosynthesis (matches paper text)
+  "2" = "OPC_B",          # XIST-dominant — likely female-enriched subcluster
+  "3" = "OPC_C",
+  "4" = "OPC_D",
+  "5" = "OPC_Prolif",     # RPL32, RPS24, EEF1A1 — ribosomal/actively translating
+  "6" = "PreOL",          # ST18, MAP7 — premyelinating (matches paper's ~1% premyelinating OPC)
+  "7" = "OPC_E",          # BCAS1 — possibly early newly-formed OL
+  "8" = "Immune_OPC"      # FCGR2A, ACSL1, APBB1IP — immunological OPC (paper: 23% at lesion edge)
+)
+absinta_ol <- load_markers_long(
+  file.path(sig_dir, "absinta_2021.xlsx"),   # corrected filename
+  sheet = "Table S5_OL", cluster_map = absinta_ol_map,
+  padj_max = 0.05, logfc_min = 0.25, top_n = 100
+)
+
+absinta_opc <- load_markers_long(
+  file.path(sig_dir, "absinta_2021.xlsx"),
+  sheet = "Table S6_OPC", cluster_map = absinta_opc_map,
+  padj_max = 0.05, logfc_min = 0.25, top_n = 100
+)
+names(absinta_ol)  <- paste0("Absinta_", names(absinta_ol))
+names(absinta_opc) <- paste0("Absinta_", names(absinta_opc))
+
+# ---- FALCÃO 2018 (only runs if the file has been uploaded) ---------------
+falcao_file <- file.path(sig_dir, "falcao_2018.xlsx")
+falcao_ol <- list(); falcao_modules <- list()
+if (file.exists(falcao_file)) {
+  falcao_ol_map <- c(
+    "diffclustersOPC1"          = "Falcao_OPC1",
+    "diffclustersOPC2"          = "Falcao_OPC2",
+    "diffclustersOPC3"          = "Falcao_OPC3",
+    "diffclustersOPC_Cycling"   = "Falcao_OPC_Cycling",
+    "diffclustersCOP"           = "Falcao_COP",
+    "diffclustersNFOL"          = "Falcao_NFOL",
+    "diffclustersMOL1_2_EAE"    = "Falcao_MOL1_2_EAE",
+    "diffclustersMOL2_Cntrl_A"  = "Falcao_MOL2_Cntrl",
+    "diffclustersMOL3_EAE"      = "Falcao_MOL3_EAE",
+    "diffclustersMOL5_6_Cntrl_A"= "Falcao_MOL5_6_Cntrl_A",
+    "diffclustersMOL5_6_Cntrl_B"= "Falcao_MOL5_6_Cntrl_B",
+    "diffclustersMOL5_6_EAE_A"  = "Falcao_MOL5_6_EAE_A",
+    "diffclustersMOL5_6_EAE_B"  = "Falcao_MOL5_6_EAE_B",
+    "diffclustersMOL5_6_EAE_C"  = "Falcao_MOL5_6_EAE_C"
+  )
+  falcao_ol <- load_markers_wide(
+    falcao_file, sheet = "DifferentialExpressionOLs",
+    fc_min = 5, top_n = 100, cluster_map = falcao_ol_map
+  )
+  falcao_modules <- load_modules(
+    falcao_file, sheet = "GenemodulesNNMF",
+    modules = c(1, 2, 3, 4, 6), top_n = 100
+  )
+  names(falcao_modules)[names(falcao_modules) == "module_1"] <- "Falcao_immuneOL_NNMF1"
+} else {
+  message("Falcão file not found at ", falcao_file,
+          " - skipping Falcão signatures.")
+}
+
+# ---- Combine + record species per signature ------------------------------
+signatures <- c(pandey, mcnair_ol,
+                absinta_ol, absinta_opc,
+                falcao_ol, falcao_modules)
+
+sig_species <- c(
+  setNames(rep("mouse", length(pandey)),         names(pandey)),
+  setNames(rep("human", length(mcnair_ol)),      names(mcnair_ol)),
+  setNames(rep("human", length(absinta_ol)),     names(absinta_ol)),
+  setNames(rep("human", length(absinta_opc)),    names(absinta_opc)),
+  setNames(rep("mouse", length(falcao_ol)),      names(falcao_ol)),
+  setNames(rep("mouse", length(falcao_modules)), names(falcao_modules))
+)
+
+tibble(signature = names(signatures),
+       n_genes   = lengths(signatures),
+       species   = sig_species[names(signatures)]) %>% print(n = 100)
+```
+
+```{r score_signatures}
+# =============================================================================
+# 4. SCORE EVERY SIGNATURE ON THE OL OBJECT
+# =============================================================================
+DefaultAssay(OL) <- "RNA"
+
+for (nm in names(signatures)) {
+  OL <- score_signature(OL,
+                        genes   = signatures[[nm]],
+                        name    = nm,
+                        species = sig_species[[nm]])
+}
+
+ol_features <- intersect(names(signatures), colnames(OL@meta.data))
+ol_features
+```
+
+```{r plot_OL_signatures, fig.width=16, fig.height=14}
+# =============================================================================
+# 5. UMAP FEATUREPLOTS + SPLIT VIOLIN PLOTS
+# =============================================================================
+p <- FeaturePlot(OL,
+            features = ol_features,
+            reduction = "umap_OL",
+            order = TRUE,
+            ncol = 4,
+            min.cutoff = "q5",
+            max.cutoff = "q95") &
+  scale_color_gradientn(colors = c("lightgrey", "#fdae61", "#d7191c"))
+print(p)
+
+p1<-VlnPlot(OL,
+        features = ol_features,
+        group.by = "OL_clusters",
+        split.by = "orig.ident",
+        pt.size = 0,
+        ncol = 2) &
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+print(p1)
+```
+
+
+```{r stats_EAE_vs_CFA}
+# =============================================================================
+# 7. STATISTICAL COMPARISON EAE vs CFA, PER CLUSTER, PER SIGNATURE
+# =============================================================================
+compare_scores <- function(seurat_obj, score_cols, cluster_col,
+                           condition_col = "orig.ident") {
+  form <- as.formula(paste("score ~", condition_col))
+
+  seurat_obj@meta.data %>%
+    select(all_of(c(cluster_col, condition_col, score_cols))) %>%
+    pivot_longer(all_of(score_cols),
+                 names_to = "signature", values_to = "score") %>%
+    drop_na(score) %>%
+    filter(is.finite(score)) %>%                              # catches Inf / NaN
+    group_by(signature, .data[[cluster_col]], .data[[condition_col]]) %>%
+    filter(n() >= 2) %>%                                      # >= 2 obs per condition
+    group_by(signature, .data[[cluster_col]]) %>%
+    filter(n_distinct(.data[[condition_col]]) >= 2) %>%       # both conditions present
+    group_modify(~ tryCatch(                                  # skip groups that still fail
+      rstatix::wilcox_test(.x, form),
+      error = function(e) tibble()
+    )) %>%
+    adjust_pvalue(method = "BH") %>%
+    add_significance("p.adj")
+}
+ol_stats <- compare_scores(OL, ol_features, "OL_clusters")
+ol_stats
+```
+
+```{r boxplots_with_pvals, fig.width=26, fig.height=40}
+# =============================================================================
+# 8. BOXPLOTS WITH WILCOXON SIGNIFICANCE BRACKETS
+# =============================================================================
+plot_score_box <- function(seurat_obj, score, cluster_col,
+                           condition_col = "orig.ident") {
+  df <- FetchData(seurat_obj, vars = c(score, cluster_col, condition_col))
+  colnames(df)[colnames(df) == score]         <- "score"
+  colnames(df)[colnames(df) == cluster_col]   <- "cluster"
+  colnames(df)[colnames(df) == condition_col] <- "condition"
+  df <- drop_na(df, score)
+
+  ggplot(df, aes(x = cluster, y = score, fill = condition)) +
+    geom_boxplot(outlier.size = 0.2, alpha = 0.85) +
+    stat_compare_means(aes(group = condition),
+                       method = "wilcox.test",
+                       label = "p.signif",
+                       hide.ns = TRUE) +
+    scale_fill_manual(values = c("CFA" = "#4575b4", "EAE" = "#d73027")) +
+    theme_classic(base_size = 10) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = score, x = NULL, y = "Module score")
+}
+
+ol_boxes <- lapply(ol_features, plot_score_box,
+                   seurat_obj = OL, cluster_col = "OL_clusters")
+wrap_plots(ol_boxes, ncol = 2)
+```
+
+```{r heatmap_mean_scores, fig.width=12, fig.height=8}
+# =============================================================================
+# 9. HEATMAP - MEAN SIGNATURE SCORE PER (CLUSTER × CONDITION)
+# =============================================================================
+make_score_matrix <- function(seurat_obj, scores, cluster_col,
+                              condition_col = "orig.ident") {
+  seurat_obj@meta.data %>%
+    select(all_of(c(cluster_col, condition_col, scores))) %>%
+    mutate(group = paste(.[[cluster_col]], .[[condition_col]], sep = "_")) %>%
+    select(-all_of(c(cluster_col, condition_col))) %>%
+    group_by(group) %>%
+    summarise(across(everything(), mean, na.rm = TRUE)) %>%
+    column_to_rownames("group") %>%
+    as.matrix() %>% t()
+}
+
+ol_mat_clean <- ol_mat
+
+# replace NA / NaN / Inf with 0
+ol_mat_clean[!is.finite(ol_mat_clean)] <- 0
+
+# drop rows with zero variance — they collapse to NaN after row-scaling
+ol_mat_clean <- ol_mat_clean[apply(ol_mat_clean, 1, var) > 0, , drop = FALSE]
+
+pheatmap(ol_mat_clean,
+         scale = "row",
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("navy", "white", "firebrick"))(50),
+         main = "OL-lineage signatures - mean score by cluster × condition")
+```
+
+
+
+
+

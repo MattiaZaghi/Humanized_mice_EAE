@@ -1,0 +1,512 @@
+---
+title: "OPC in depth"
+author: "Mattia Zaghi"
+date: "2026-08-26"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+## What is this vignette for?
+This Vignette contains all the necessary data analysis steps followed to analyzed the single cell RNA-seq of Mature humanized_mouse_braindendrocytes treated with FGF and Tomato controls including the code to generate the different figures.
+
+
+##1.Load packages, configure directories and create the Seurat object
+
+This section of the code is necessary to load all the necessary packages for the analysis, configure the directories and create the Seurat object that is going to be used for the rest of the analysis.
+
+##1.1 Load packages, configure directories
+
+1.First load all the necessary packages in order to run all the subsequent steps & set the working directory where all the output of this analysis will be saved and stored
+
+```{r setup, include=FALSE}
+library(Seurat)
+library(future)
+library(tidyverse)
+library(dplyr)
+library(ggthemes)
+library(scales)
+library(cowplot)
+library(RColorBrewer)
+library(openxlsx)
+library(homologene)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(org.Hs.eg.db)
+library(purrr)
+library(forcats)
+library(readxl)
+library(hdf5r)
+library(patchwork)
+library(pals)
+library(knitr)
+library(DoubletFinder)
+library(ggpubr)
+library(patchwork)
+library(rstatix)
+library(pheatmap)
+opts_knit$set(root.dir = "/date/gcb/gcb_MZ/Humanized_mice_OD/")# change accordingly
+
+#source("/home/mattia/FGF_signaling_induces_disease-associated_humanized_mouse_braindendrocytes/functions.R")
+```
+
+##1.1 Load the OPC-OPCs object 
+
+
+```{r}
+OL <- readRDS("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/objects/Oligodendroglia_SCT.rds") 
+
+
+```
+
+
+first check clusters on the dimplot
+
+```{r}
+my_colors <- c(
+  "#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD",
+  "#8C564B", "#17BECF", "#BCBD22", "#7F7F7F", "#e377c2",
+  "#aec7e8", "#ffbb78", "#98df8a"
+)
+
+
+p1 <- DimPlot(OL, reduction = "umap_OL", group.by = c("OL_clusters"), cols = my_colors) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+p1
+```
+Remove possible cell doublets contamination from OPCs
+
+```{r}
+OPC_EAE <- subset(OL, idents = c("0", "1", "2","4","5"))
+```
+
+Renormalize the datasets and recluster using only the selected cells   
+
+```{r}
+DefaultAssay(OPC_EAE) <- "RNA"
+
+# Remove the OPC_EAEd SCT assay
+OPC_EAE[["SCT"]] <- NULL
+
+# Now run SCTransform renormalizing with only the OPC_EAE_OPC cells
+OPC_EAE <- SCTransform(OPC_EAE, vst.flavor = "v2", verbose = FALSE)
+
+# Continue with custom-named reductions
+OPC_EAE <- RunPCA(OPC_EAE, verbose = TRUE, reduction.name = "pca_OPC_EAE_SCT")
+
+OPC_EAE <- FindNeighbors(OPC_EAE, reduction = "pca_OPC_EAE_SCT", dims = 1:15,
+                      graph.name = c("OPC_EAE_nn", "OPC_EAE_snn"))
+
+OPC_EAE <- FindClusters(OPC_EAE, resOPC_EAEution = 0.1, 
+                     graph.name = "OPC_EAE_snn",
+                     cluster.name = "OPC_EAE_clusters")
+
+OPC_EAE <- RunUMAP(OPC_EAE, reduction = "pca_OPC_EAE_SCT", dims = 1:15, 
+                reduction.name = "umap_OPC_EAE")
+
+
+```
+
+Reclustering of the EAE OPCs
+
+```{r}
+OPC_EAE <- subset(OL, idents = c("0", "1", "2","4","5"))
+```
+
+Renormalize the datasets and recluster using only the selected cells   
+
+```{r}
+DefaultAssay(OPC_EAE) <- "RNA"
+
+# Remove the OPC_EAEd SCT assay
+OPC_EAE[["SCT"]] <- NULL
+
+# Now run SCTransform renormalizing with only the OPC_EAE_OPC cells
+OPC_EAE <- SCTransform(OPC_EAE, vst.flavor = "v2", verbose = FALSE)
+
+# Continue with custom-named reductions
+OPC_EAE <- RunPCA(OPC_EAE, verbose = TRUE, reduction.name = "pca_OPC_EAE_SCT")
+
+OPC_EAE <- FindNeighbors(OPC_EAE, reduction = "pca_OPC_EAE_SCT", dims = 1:15,
+                      graph.name = c("OPC_EAE_nn", "OPC_EAE_snn"))
+
+OPC_EAE <- FindClusters(OPC_EAE, resolution = 0.1, 
+                     graph.name = "OPC_EAE_snn",
+                     cluster.name = "OPC_EAE_clusters")
+
+OPC_EAE <- RunUMAP(OPC_EAE, reduction = "pca_OPC_EAE_SCT", dims = 1:15, 
+                reduction.name = "umap_OPC_EAE")
+
+
+```
+
+
+
+
+
+```{r}
+my_colors <- c(
+  "#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD",
+  "#8C564B", "#17BECF", "#BCBD22", "#7F7F7F", "#e377c2",
+  "#aec7e8", "#ffbb78", "black", "orange"
+)
+
+p1 <- DimPlot(OPC_EAE, reduction = "umap_OPC_EAE", group.by = c("OPC_EAE_clusters"), cols = my_colors) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with new clustering
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p2 <- DimPlot(OPC_EAE, reduction = "umap_OPC_EAE", group.by = c("orig.ident")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p3 <- DimPlot(OPC_EAE, reduction = "umap_OPC_EAE", group.by = c("sample")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p4 <- DimPlot(OPC_EAE, reduction = "umap_OPC_EAE", group.by = c("broad_clustering")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p1
+p2
+p3
+p4
+
+```
+
+Marker features calculations in OLs
+
+```{r}
+
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+
+  DefaultAssay(OPC_EAE) <- "SCT"
+  OPC_EAE <- PrepSCTFindMarkers(OPC_EAE, assay = "SCT", verbose = TRUE)
+  OL_markers <- FindAllMarkers(OPC_EAE, only.pos = TRUE)
+
+
+ # Create a new workbook
+wb <- createWorkbook()
+
+# Loop through each cluster and add data to a new sheet
+for (cluster_value in unique(OL_markers$cluster)) {
+  cluster_data <- subset(OL_markers, cluster == cluster_value)
+  sheet_name <- paste0("Cluster_", cluster_value)
+  addWorksheet(wb, sheet_name)
+  writeData(wb, sheet_name, cluster_data)
+}
+
+# Save the workbook to a file 
+saveWorkbook(wb, "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/cluster_markers/Oligodendroglia_clean_markers.xlsx", overwrite = TRUE)
+```
+
+
+
+
+
+##1.3 OPC EAE reclustering
+
+Reclustering of the EAE OPCs
+
+```{r}
+MOL_EAE <- subset(OL_clean, idents = c("1", "2"))
+```
+
+Renormalize the datasets and recluster using only the selected cells   
+
+```{r}
+DefaultAssay(MOL_EAE) <- "RNA"
+
+# Remove the MOL_EAEd SCT assay
+MOL_EAE[["SCT"]] <- NULL
+
+# Now run SCTransform renormalizing with only the MOL_EAE_OPC cells
+MOL_EAE <- SCTransform(MOL_EAE, vst.flavor = "v2", verbose = FALSE)
+
+# Continue with custom-named reductions
+MOL_EAE <- RunPCA(MOL_EAE, verbose = TRUE, reduction.name = "pca_MOL_EAE_SCT")
+
+MOL_EAE <- FindNeighbors(MOL_EAE, reduction = "pca_MOL_EAE_SCT", dims = 1:15,
+                      graph.name = c("MOL_EAE_nn", "MOL_EAE_snn"))
+
+MOL_EAE <- FindClusters(MOL_EAE, resolution = 0.1, 
+                     graph.name = "MOL_EAE_snn",
+                     cluster.name = "MOL_EAE_clusters")
+
+MOL_EAE <- RunUMAP(MOL_EAE, reduction = "pca_MOL_EAE_SCT", dims = 1:15, 
+                reduction.name = "umap_MOL_EAE")
+
+
+```
+
+
+```{r}
+my_colors <- c(
+  "#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD",
+  "#8C564B", "#17BECF", "#BCBD22", "#7F7F7F", "#e377c2",
+  "#aec7e8", "#ffbb78", "black", "orange"
+)
+
+p1 <- DimPlot(OPC_EAE, reduction = "umap_OPC_EAE", group.by = c("OPC_EAE_clusters"), cols = my_colors) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with new clustering
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p2 <- DimPlot(OPC_EAE, reduction = "umap_OPC_EAE", group.by = c("orig.ident")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p3 <- DimPlot(OPC_EAE, reduction = "umap_OPC_EAE", group.by = c("sample")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p4 <- DimPlot(OPC_EAE, reduction = "umap_OPC_EAE", group.by = c("broad_clustering")) + labs(x = "UMAP 1", y = "UMAP 2") + #UMAP with samples
+ theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 24,
+      face = "bold"
+    ),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    legend.text = element_text(size = 16),         # Legend labels
+    legend.title = element_text(size = 24, face = "bold"),  # Legend title
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+p1
+p2
+p3
+p4
+
+```
+
+Marker features calculations in OLs
+
+```{r}
+
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+
+  DefaultAssay(MOL_EAE) <- "SCT"
+ MOL_EAE <- PrepSCTFindMarkers(MOL_EAE, assay = "SCT", verbose = TRUE)
+  OL_markers <- FindAllMarkers(MOL_EAE, only.pos = TRUE)
+
+
+ # Create a new workbook
+wb <- createWorkbook()
+
+# Loop through each cluster and add data to a new sheet
+for (cluster_value in unique(OL_markers$cluster)) {
+  cluster_data <- subset(OL_markers, cluster == cluster_value)
+  sheet_name <- paste0("Cluster_", cluster_value)
+  addWorksheet(wb, sheet_name)
+  writeData(wb, sheet_name, cluster_data)
+}
+
+# Save the workbook to a file 
+saveWorkbook(wb, "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/cluster_markers/MOL_EAE_markers.xlsx", overwrite = TRUE)
+```
+
+##1.4 OPC OPCs EAE reclustering
+
+eclustering of the EAE OPCs
+
+```{r}
+OPC <- subset(OL_clean, idents = c("3", "4"))
+```
+
+Renormalize the datasets and recluster using only the selected cells   
+
+```{r}
+DefaultAssay(OPC) <- "RNA"
+
+# Remove the OPC_EAEd SCT assay
+OPC[["SCT"]] <- NULL
+
+# Now run SCTransform renormalizing with only the OPC_EAE_OPC cells
+OPC <- SCTransform(OPC, vst.flavor = "v2", verbose = FALSE)
+
+# Continue with custom-named reductions
+OPC <- RunPCA(OPC, verbose = TRUE, reduction.name = "pca_OPC_SCT")
+
+OPC <- FindNeighbors(OPC, reduction = "pca_OPC_SCT", dims = 1:15,
+                      graph.name = c("OPC_nn", "OPC_snn"))
+
+OPC <- FindClusters(OPC, resolution = 0.1, 
+                     graph.name = "OPC_snn",
+                     cluster.name = "OPC_clusters")
+
+OPC <- RunUMAP(OPC, reduction = "pca_OPC_SCT", dims = 1:15, 
+                reduction.name = "umap_OPC")
+
+
+```
+
+Export metadata and UMAP coordinates
+```{r}
+suppressPackageStartupMessages({ library(Seurat); library(openxlsx) })
+
+out_xlsx <- "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/UMAP_Metadata_count_matrices/Oligo_lineage_metadata.xlsx"
+
+
+cat("marks:", paste(names(objects), collapse = ", "), "\n")
+
+wb <- createWorkbook()
+for (mk in names(objects)) {
+  md <- objects[[mk]]@meta.data
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+}
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+cat("Wrote:", out_xlsx, "\n")
+
+
+out_xlsx <- "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/UMAP_Metadata_count_matrices/Oligo_lineage_UMAP_coordinates.xlsx"
+
+cat("marks:", paste(names(objects), collapse = ", "), "\n")
+
+wb <- createWorkbook()
+for (mk in names(objects)) {
+  md <- objects[[mk]]@reductions[[paste0("umap_",mk)]]@cell.embeddings
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+}
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+cat("Wrote:", out_xlsx, "\n")
+
+out_xlsx <- "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/UMAP_Metadata_count_matrices/Oligo_lineage_UMAP_coordinates.xlsx"
+
+
+OL_count_matrices<-data.frame(OL_clean@assays[["RNA"]]@layers[["counts"]])
+  
+  
+  
+```
+
+
+

@@ -1,0 +1,1949 @@
+---
+title: "Humanized mice EAE analysis - hashed brain nuclei (Cerebellum / Olfactory Bulb / Striatum / Cortex)"
+author: "Mattia Zaghi"
+date: "2026-09-15"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+## What is this vignette for?
+
+This vignette processes the **hashed brain nuclei** samples defined in
+`Preprocessing/config/config_hashing.yaml`. Four brain regions were pooled into
+each 10x channel and separated afterwards by TotalSeq-B anti-Nuclear-Pore-Complex
+hashtags:
+
+| Hashtag | Antibody     | Region         |
+|---------|--------------|----------------|
+| AB1     | TotalSeq-B0451 | Cerebellum     |
+| AB2     | TotalSeq-B0452 | Olfactory Bulb |
+| AB3     | TotalSeq-B0453 | Striatum       |
+| AB4     | TotalSeq-B0454 | Cortex         |
+
+The design differs from the other datasets in this repository in three ways:
+
+* **Region is a within-library variable, not a library.** All four regions share a
+  channel, so region is recovered by demultiplexing rather than read off the sample
+  sheet. A region-specific effect is therefore free of library batch.
+* **`rep1` and `rep2` are technical replicates of the same animal** - one nuclei
+  suspension split over two 10x channels. They carry no independent biological
+  information and are pooled into a single per-animal profile for every statistical
+  test; `rep` is retained only as a batch/QC covariate. The units of replication are
+  `CFA` (n = 3 animals), `EAE-NonSymp` (n = 3) and `EAE-Symp` (**n = 1**).
+* **These libraries are substantially more contaminated than the first-run brain
+  nuclei.** Section 3 quantifies this against the five unhashed whole-hemisphere
+  libraries of `analysis.Rmd` (`CFA_brain_1-2`, `EAE_brain_1-3`), which are single
+  nuclei suspensions from the same protocol, the same tissue and the same Snakemake
+  rules - hashing is the only step that differs. That makes them the right baseline:
+  any gap between the two datasets is attributable to the hashing prep rather than to
+  nuclei versus whole cells. The headline is that CellBender's *cell calling* fails
+  on the hashed libraries even though its *denoising* works well, which is why section
+  4 takes the cell definition from Cell Ranger and the counts from CellBender.
+
+As in `analysis_CD45.Rmd`, the single symptomatic animal is reserved from testing:
+with one biological replicate there is no within-group variance to estimate, so a
+nominal p-value would reflect only within-animal cell-to-cell noise. `EAE-Symp` is
+embedded, clustered, annotated and plotted alongside the rest and reported as effect
+sizes without p-values (section 11).
+
+Everything else mirrors the established pipeline: per-sample QC, per-sample
+DoubletFinder, merge, SCTransform, clustering, per-region reclustering, and
+pseudobulk DESeq2 within each cluster.
+
+##1. Load packages and configure directories
+
+```{r setup, include=FALSE}
+library(Seurat)
+library(future)
+library(tidyverse)
+library(dplyr)
+library(ggthemes)
+library(scales)
+library(cowplot)
+library(RColorBrewer)
+library(openxlsx)
+library(purrr)
+library(forcats)
+library(hdf5r)
+library(patchwork)
+library(pals)
+library(knitr)
+library(DoubletFinder)
+library(ggpubr)
+library(ggridges)
+library(pheatmap)
+library(DESeq2)
+library(ggrepel)
+library(yaml)
+opts_knit$set(root.dir = "/ws/gcb/MZ/Humanized_mice_OD/hashing/") # change accordingly
+```
+
+```{r}
+base_dir <- "/ws/gcb/MZ/Humanized_mice_OD/hashing/"
+
+# The first-run brain libraries, used in section 3 only, as the same-protocol
+# baseline for the contamination diagnostics: single nuclei suspensions from whole
+# half-hemispheres, 2 CFA and 3 EAE, unhashed. These live one level up from the
+# hashing directory, each in its own sample folder.
+ref_dir <- "/ws/gcb/MZ/Humanized_mice_OD/"
+
+# Their CellBender output sits in epochs_300/, not epochs/.
+ref_epochs <- "epochs_300"
+
+# knitr's root.dir points at the data directory, not the repository, so the
+# config is addressed absolutely. Adjust repo_dir if the checkout moves.
+repo_dir <- "/home/mattia/Humanized_mice_EAE"
+
+res_dir     <- "/ws/gcb/MZ/Humanized_mice_OD/Results"
+obj_dir     <- file.path(res_dir, "objects")
+markers_dir <- file.path(res_dir, "cluster_markers")
+plots_dir   <- file.path(res_dir, "Plots")
+for (d in c(res_dir, obj_dir, markers_dir, plots_dir)) {
+  dir.create(d, recursive = TRUE, showWarnings = FALSE)
+}
+```
+
+##2. Sample sheet
+
+Sample names are read from the preprocessing config rather than retyped, so this
+vignette cannot drift out of sync with what Cell Ranger actually processed.
+Condition, animal and technical replicate are parsed from the sample name
+(`<condition>_Brain_<animal>_rep<n>`). `animal` is shared by `rep1` and `rep2` and
+is the unit of replication for every condition contrast.
+
+Region names come from the feature reference that Cell Ranger was given, for the
+same reason. Seurat rewrites underscores in feature names to dashes, so the
+hashtag names are sanitised here once and used consistently from this point on
+(`Olfactory_Bulb` -> `Olfactory-Bulb`).
+
+```{r}
+config_path  <- file.path(repo_dir, "Preprocessing/config/config_hashing.yaml")
+feature_path <- file.path(repo_dir,
+                          "Preprocessing/config/feature_reference_TotalSeqB_NPC_hashtags.csv")
+stopifnot(file.exists(config_path), file.exists(feature_path))
+
+cfg             <- yaml::read_yaml(config_path)
+hashing_samples <- names(cfg$samples)
+
+feature_ref   <- read.csv(feature_path, stringsAsFactors = FALSE)
+region_levels <- gsub("_", "-", feature_ref$name)
+hto_ids       <- feature_ref$id
+names(region_levels) <- hto_ids
+region_levels
+
+sample_sheet <- data.frame(
+  sample = hashing_samples,
+  stringsAsFactors = FALSE
+)
+# <condition>_Brain_<animal>_rep<n>
+sample_sheet$condition <- sub("_Brain_[0-9]+_rep[0-9]+$", "", sample_sheet$sample)
+sample_sheet$animal_n  <- sub("^.*_Brain_([0-9]+)_rep[0-9]+$", "\\1", sample_sheet$sample)
+sample_sheet$rep       <- sub("^.*_(rep[0-9]+)$", "\\1", sample_sheet$sample)
+# rep1 and rep2 are the same mouse, so the animal id drops the replicate.
+sample_sheet$animal    <- paste(sample_sheet$condition, sample_sheet$animal_n, sep = "_")
+
+sample_sheet$condition <- factor(sample_sheet$condition,
+                                 levels = c("CFA", "EAE-NonSymp", "EAE-Symp"))
+sample_sheet$rep       <- factor(sample_sheet$rep)
+
+# Sanity checks: two channels per animal, and how many animals per condition
+with(sample_sheet, table(condition, rep))
+with(sample_sheet, tapply(animal, condition, function(x) length(unique(x))))
+sample_sheet
+```
+
+##3. Audit of the Cell Ranger and CellBender runs
+
+This section is pure file parsing - it reads the metrics that the pipeline already
+wrote and puts the 14 hashing libraries next to the 5 first-run brain libraries
+(`CFA_brain_1-2`, `EAE_brain_1-3`). Those are the right comparison: single nuclei
+suspensions from whole half-hemispheres of the same model, prepared by the same
+protocol and processed by the same Snakemake rules with the same Cell Ranger 9.0.1,
+the same GRCh38-and-mm10 reference and the same CellBender settings (`--fpr 0.01`).
+The only difference is the hashing step. A gap between the two datasets therefore
+isolates the hashing prep, where a comparison against sorted whole cells would
+confound it with the nuclei-versus-cells difference.
+
+This runs before any data is loaded, because its result determines how the data is
+loaded in section 4.
+
+```{r}
+# Cell Ranger writes percentages and thousands separators into metrics_summary.csv.
+parse_metric <- function(x) {
+  x <- gsub(",", "", as.character(x))
+  pct <- grepl("%", x, fixed = TRUE)
+  v <- suppressWarnings(as.numeric(gsub("%", "", x)))
+  v[pct] <- v[pct] / 100
+  v
+}
+
+read_cellranger_metrics <- function(dir, samples) {
+  do.call(rbind, lapply(samples, function(s) {
+    f <- file.path(dir, s, "RNA_AAAAGGGG/cellranger/outs/metrics_summary.csv")
+    if (!file.exists(f)) return(NULL)
+    m <- read.csv(f, check.names = FALSE, stringsAsFactors = FALSE)
+    get1 <- function(col) if (col %in% colnames(m)) parse_metric(m[[col]][1]) else NA_real_
+    data.frame(
+      sample         = s,
+      cr_cells       = get1("Estimated Number of Cells"),
+      mean_reads     = get1("Mean Reads per Cell"),
+      saturation     = get1("Sequencing Saturation"),
+      pct_txome      = get1("Reads Mapped Confidently to Transcriptome"),
+      frac_in_cells  = get1("Fraction Reads in Cells"),
+      hg38_cells     = get1("GRCh38 Estimated Number of Cell Partitions"),
+      mm10_cells     = get1("mm10 Estimated Number of Cell Partitions"),
+      barnyard_mult  = get1("Fraction GEMs with >1 Cell"),
+      ab_reads       = get1("Antibody: Number of Reads"),
+      ab_usable      = get1("Antibody: Fraction Antibody Reads Usable"),
+      ab_unrecog     = get1("Antibody: Fraction Unrecognized Antibody"),
+      ab_median_umi  = get1("Antibody: Median UMIs per Cell (summed over all recognized antibody barcodes)"),
+      stringsAsFactors = FALSE
+    )
+  }))
+}
+
+read_cellbender_metrics <- function(dir, samples, epochs_dir = "epochs") {
+  do.call(rbind, lapply(samples, function(s) {
+    ep <- file.path(dir, s, "RNA_AAAAGGGG", epochs_dir)
+    f  <- file.path(ep, "cellbender_output_metrics.csv")
+    if (!file.exists(f)) return(NULL)
+    m <- read.csv(f, header = FALSE, stringsAsFactors = FALSE)
+    v <- setNames(as.numeric(m[[2]]), m[[1]])
+
+    # The cell and empty count priors are only in the log, and their ratio is the
+    # single most informative contamination diagnostic: it is how well separated
+    # the cell and empty-droplet count distributions are.
+    lg <- file.path(ep, "cellbender_output.log")
+    grab <- function(pat) {
+      if (!file.exists(lg)) return(NA_real_)
+      hit <- grep(pat, readLines(lg, warn = FALSE), value = TRUE)
+      if (length(hit) == 0) return(NA_real_)
+      as.numeric(sub(".*?([0-9]+)\\s*$", "\\1", tail(hit, 1)))
+    }
+    data.frame(
+      sample          = s,
+      cb_cells        = v[["found_cells"]],
+      cb_expected     = v[["expected_cells"]],
+      cb_ratio        = v[["ratio_of_found_cells_to_expected_cells"]],
+      cb_empties      = v[["found_empties"]],
+      frac_nonempty   = v[["fraction_of_analyzed_droplets_that_are_nonempty"]],
+      frac_removed    = v[["fraction_counts_removed"]],
+      counts_out      = v[["output_average_counts_per_cell"]],
+      convergence     = v[["convergence_indicator"]],
+      prior_cells     = grab("Prior on counts for cells is"),
+      prior_empty     = grab("Prior on counts for empty droplets is"),
+      largest_empty   = grab("Largest surely-empty droplet has"),
+      stringsAsFactors = FALSE
+    )
+  }))
+}
+```
+
+```{r}
+qc_hash <- left_join(read_cellranger_metrics(base_dir, hashing_samples),
+                     read_cellbender_metrics(base_dir, hashing_samples),
+                     by = "sample") %>%
+  left_join(sample_sheet, by = "sample") %>%
+  mutate(dataset          = "hashing (nuclei)",
+         prior_ratio      = prior_cells / prior_empty,
+         cb_over_cr       = cb_cells / cr_cells,
+         frac_human_cells = hg38_cells / (hg38_cells + mm10_cells))
+
+# Baseline sample names come from the first run's own config, filtered to brain, so
+# the spleen libraries of that run are excluded and nothing is retyped.
+ref_config  <- file.path(repo_dir, "Preprocessing/config/config.yaml")
+stopifnot(file.exists(ref_config))
+ref_samples <- grep("_brain_", names(yaml::read_yaml(ref_config)$samples),
+                    value = TRUE)
+ref_samples <- ref_samples[file.exists(file.path(
+  ref_dir, ref_samples, "RNA_AAAAGGGG", ref_epochs,
+  "cellbender_output_metrics.csv"))]
+cat("Baseline libraries:", paste(ref_samples, collapse = ", "), "\n")
+
+qc_ref <- left_join(read_cellranger_metrics(ref_dir, ref_samples),
+                    read_cellbender_metrics(ref_dir, ref_samples,
+                                            epochs_dir = ref_epochs),
+                    by = "sample") %>%
+  mutate(dataset          = "first run (unhashed nuclei)",
+         condition        = factor(sub("_brain_[0-9]+$", "", sample)),
+         prior_ratio      = prior_cells / prior_empty,
+         cb_over_cr       = cb_cells / cr_cells,
+         frac_human_cells = hg38_cells / (hg38_cells + mm10_cells))
+
+qc_hash %>%
+  select(sample, condition, rep, cr_cells, mean_reads, saturation, pct_txome,
+         frac_in_cells, mm10_cells, hg38_cells, frac_human_cells) %>%
+  arrange(sample)
+```
+
+The contamination comparison. Every row is a diagnostic where the two datasets
+should look alike, since they are the same tissue, the same nuclei protocol and the
+same pipeline.
+
+```{r}
+# Common columns only, so the two sample sheets (which differ) do not clash.
+shared_cols <- intersect(names(qc_hash), names(qc_ref))
+qc_both     <- bind_rows(select(qc_hash, all_of(shared_cols)) %>%
+                           mutate(condition = as.character(condition)),
+                         select(qc_ref, all_of(shared_cols)) %>%
+                           mutate(condition = as.character(condition)))
+
+qc_compare <- qc_both %>%
+  group_by(dataset) %>%
+  summarise(
+    n_libraries            = n(),
+    `Fraction reads in cells` = sprintf("%.2f - %.2f (med %.2f)",
+                                        min(frac_in_cells), max(frac_in_cells),
+                                        median(frac_in_cells)),
+    `Cell:empty count prior`  = sprintf("%.0fx - %.0fx", min(prior_ratio), max(prior_ratio)),
+    `Fraction counts removed` = sprintf("%.3f - %.3f", min(frac_removed), max(frac_removed)),
+    `CellBender/CellRanger cells` = sprintf("%.1fx - %.1fx", min(cb_over_cr), max(cb_over_cr)),
+    `Counts per cell after denoising` = sprintf("%.0f - %.0f", min(counts_out), max(counts_out)),
+    .groups = "drop"
+  )
+knitr::kable(t(qc_compare))
+```
+
+Everything follows from the cell:empty count-prior ratio - how far apart CellBender
+puts the count distributions of cells and of empty droplets. The first-run nuclei
+separate them by roughly an order of magnitude; the hashed libraries by about
+fourfold. Both are far from the clean separation seen in sorted whole cells, which
+is expected for nuclei, but the hashed libraries are about three times worse than
+our own unhashed nuclei, and the consequences scale with it: three to four times
+more counts removed as ambient, less than half the counts per cell surviving
+denoising, and - the point that matters for section 4 - a complete breakdown of cell
+calling that is absent from the baseline.
+
+The second panel is the decisive one. On the unhashed libraries CellBender and Cell
+Ranger agree on the number of cells to within a few percent, so either cell
+definition could be used. On the hashed libraries CellBender calls four to six times
+as many, because with the cell and empty distributions overlapping it has no basis
+for the boundary. That is a failure of *cell calling* specifically, not of
+denoising, and it is what motivates taking barcodes from one tool and counts from
+the other.
+
+```{r, fig.height=5, fig.width=14}
+qc_both %>%
+  ggplot(aes(x = prior_ratio, y = frac_removed, colour = dataset)) +
+  geom_point(size = 3, alpha = 0.85) +
+  scale_x_log10() +
+  labs(x = "CellBender cell:empty count prior ratio (log scale)",
+       y = "Fraction of counts removed as ambient", colour = NULL) +
+  theme_classic(base_size = 13) -> g1
+
+qc_both %>%
+  ggplot(aes(x = cr_cells, y = cb_cells, colour = dataset)) +
+  geom_abline(slope = 1, linetype = "dashed", colour = "grey50") +
+  geom_point(size = 3, alpha = 0.85) +
+  labs(x = "Cell Ranger estimated cells",
+       y = "CellBender called cells", colour = NULL,
+       subtitle = "Dashed line: agreement") +
+  theme_classic(base_size = 13) -> g2
+
+g1 + g2
+```
+
+Per-library detail behind the two panels, hashing libraries first:
+
+```{r}
+qc_both %>%
+  select(dataset, sample, cr_cells, cb_cells, cb_over_cr, prior_cells, prior_empty,
+         prior_ratio, largest_empty, frac_in_cells, frac_removed, counts_out) %>%
+  arrange(dataset, desc(cb_over_cr))
+```
+
+```{r, fig.height=5, fig.width=12}
+ggplot(qc_hash, aes(x = reorder(sample, frac_removed), y = frac_removed,
+                    fill = condition)) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous(labels = percent) +
+  labs(x = NULL, y = "Fraction of counts removed as ambient by CellBender") +
+  theme_classic(base_size = 12)
+```
+
+Libraries to keep an eye on. Two criteria are used, and **both** must fire, because
+neither is decisive alone:
+
+* `convergence_indicator` well above zero means the ELBO was still moving when
+  training stopped. On its own this says little - the baseline libraries reach
+  comparable values without any sign of trouble, so it is a noisy indicator rather
+  than a verdict. The baseline range is printed below for exactly this reason.
+* A `found_empties` count in the low hundreds together with
+  `fraction_of_analyzed_droplets_that_are_nonempty` near 1 means CellBender found
+  almost no empty-droplet population in the range it analysed, so the ambient profile
+  it subtracted is essentially unconstrained. This one *is* specific: the baseline
+  libraries find thousands of empties and classify only 64-85% of analysed droplets
+  as non-empty.
+
+A library flagged on both counts should not be the one carrying a cluster on its own;
+section 8 plots composition against `is_flagged` to check that.
+
+```{r}
+cat("Baseline convergence_indicator:",
+    sprintf("%.2f - %.2f", min(qc_ref$convergence), max(qc_ref$convergence)), "\n")
+cat("Baseline found_empties:",
+    sprintf("%.0f - %.0f", min(qc_ref$cb_empties), max(qc_ref$cb_empties)),
+    "| fraction non-empty:",
+    sprintf("%.2f - %.2f", min(qc_ref$frac_nonempty), max(qc_ref$frac_nonempty)), "\n")
+
+qc_flags <- qc_hash %>%
+  mutate(flag_convergence = convergence > 0.8,
+         flag_no_empties  = cb_empties < 500 & frac_nonempty > 0.97) %>%
+  select(sample, convergence, cb_empties, frac_nonempty,
+         flag_convergence, flag_no_empties) %>%
+  arrange(desc(flag_convergence & flag_no_empties), desc(convergence))
+qc_flags
+
+flagged_samples <- qc_flags$sample[qc_flags$flag_convergence & qc_flags$flag_no_empties]
+cat("Flagged on both criteria:", paste(flagged_samples, collapse = ", "), "\n")
+```
+
+Two further points that change how the standard metrics should be read.
+
+**The barnyard multiplet estimate is not usable here.** These are host-mouse brains
+carrying a human oligodendrocyte graft, so one genome dominates completely.
+`Fraction GEMs with >1 Cell` is derived from human-mouse collisions, and with the
+human cell partitions in the tens against thousands of mouse partitions it is
+estimated from a handful of events. The baseline libraries are included below to show
+this is a property of the model and not of the hashing prep - they have the same
+handful of human partitions. It is reported for completeness and is *not* used to set
+the doublet rate; section 7 uses the hashtags for that instead.
+
+```{r, fig.height=5, fig.width=12}
+qc_both %>%
+  select(dataset, sample, mm10_cells, hg38_cells, barnyard_mult) %>%
+  mutate(pct_human = 100 * hg38_cells / (hg38_cells + mm10_cells)) %>%
+  arrange(dataset, desc(pct_human))
+```
+
+**The hashtag library is very deeply sequenced but only a small fraction of its
+reads land in cells**, which is the same ambient story seen in the transcriptome.
+The baseline has no counterpart for this table - it was not hashed - so it is
+hashing-only. What matters for demultiplexing is the per-cell hashtag depth, and that
+is ample (roughly a thousand UMI per cell and up).
+
+```{r, fig.height=5, fig.width=12}
+qc_hash %>%
+  select(sample, ab_reads, ab_usable, ab_unrecog, ab_median_umi) %>%
+  arrange(ab_usable)
+```
+
+##4. Create the Seurat objects
+
+The audit above leads to one departure from `analysis.Rmd` and `analysis_CD45.Rmd`,
+and it is worth being explicit about why, because it is the step that determines
+which cells the rest of the vignette analyses.
+
+CellBender does two separate jobs: it decides **which droplets are cells**, and it
+decides **what the counts in those droplets should be** once ambient RNA is
+subtracted. On these libraries the second job is done well and the first is not.
+
+This is specific to the hashed libraries, which is why `analysis.Rmd` did not need
+it: on the first-run brain nuclei CellBender's call set agrees with Cell Ranger's to
+within a few percent, so taking either one gives the same cells. Here they disagree
+by four- to sixfold, so the choice has to be made deliberately.
+
+*Why the cell calling fails.* CellBender separates cells from empties using the
+total-count distribution, and section 3 showed those two distributions barely
+separate here (prior ratio around 4, surely-empty droplets holding hundreds of UMI).
+The result is that thousands of ambient-only droplets cross the cell-probability
+threshold: for `CFA_Brain_1_rep1` CellBender calls 22,539 cells whose *median*
+content is about 108 UMI in 80 genes. Cell Ranger's EmptyDrops-style call is more
+conservative because it tests each barcode's expression *profile* against the
+ambient profile instead of thresholding total counts, so it is not fooled the same
+way - it calls 3,718 cells for the same library.
+
+*Why `min.features = 200` does not rescue it.* That filter selects on the exact
+quantity ambient inflates. Applied to the CellBender call set of the same library it
+still leaves 7,906 barcodes, more than twice Cell Ranger's count, so the ambient-only
+droplets are simply being admitted at a higher threshold.
+
+*Why the two can be combined cleanly.* `cellbender_output_seurat.h5` is indexed by
+the full raw barcode list (about 1.13 M barcodes), not by CellBender's call set, so
+any column subset can be taken from it. Cell Ranger's called barcodes are
+essentially a subset of CellBender's (3,712 of 3,718 for this library), which means
+every Cell Ranger cell was already treated as a cell by CellBender's model - the
+denoised counts for those columns are the model's cell-mode output, not an
+extrapolation onto something it considered empty. So the intersection keeps
+CellBender's ambient correction and swaps in Cell Ranger's more conservative cell
+definition. Barcode strings carry the same `-1` suffix in both files, so they join
+directly.
+
+The handful of Cell Ranger cells that CellBender did not call cells are reported per
+library below; their counts are heavily stripped and they generally fall out on
+`min.features` anyway.
+
+The feature-name normalisation from `analysis_CD45.Rmd` is applied **to the gene
+expression block only**. Applying it to the hashtags as well would rewrite
+`Olfactory_Bulb` to `Olfactory-Bulb` inside the matrix while the sanitised names
+from section 2 were derived separately, and the two must not be allowed to drift
+apart. Keeping the gene normalisation byte-identical to the other vignettes is what
+lets gene names (`mm10-Gabra6`, `GRCh38-...`) match the already-annotated brain
+object used for label transfer in section 8.
+
+```{r}
+mt_cutoff <- 5   # <- provisional; revisited in section 6 with the distribution
+
+load_hashed_sample <- function(sample) {
+  cb_h5 <- file.path(base_dir, sample, "RNA_AAAAGGGG/epochs",
+                     "cellbender_output_seurat.h5")
+  cr_h5 <- file.path(base_dir, sample, "RNA_AAAAGGGG/cellranger/outs",
+                     "filtered_feature_bc_matrix.h5")
+  if (!file.exists(cb_h5) || !file.exists(cr_h5)) {
+    warning("Missing input for ", sample)
+    return(NULL)
+  }
+
+  cb <- Read10X_h5(filename = cb_h5, use.names = TRUE)
+  cr <- Read10X_h5(filename = cr_h5, use.names = TRUE)
+  if (!is.list(cb) || !"Antibody Capture" %in% names(cb)) {
+    stop("No Antibody Capture block in ", cb_h5)
+  }
+  cb_gex <- cb[["Gene Expression"]]
+  cb_hto <- cb[["Antibody Capture"]]
+  cr_gex <- if (is.list(cr)) cr[["Gene Expression"]] else cr
+
+  # Cell definition from Cell Ranger, counts from CellBender
+  keep <- intersect(colnames(cr_gex), colnames(cb_gex))
+  message(sample, ": ", ncol(cr_gex), " Cell Ranger cells, ",
+          ncol(cr_gex) - length(keep), " absent from the CellBender output")
+
+  cb_cells <- readLines(file.path(base_dir, sample, "RNA_AAAAGGGG/epochs",
+                                  "cellbender_output_cell_barcodes.csv"))
+  message("  of those, ", sum(!keep %in% cb_cells),
+          " were not called cells by CellBender")
+
+  gex <- cb_gex[, keep, drop = FALSE]
+  hto <- cb_hto[, keep, drop = FALSE]
+
+  # Gene names only: underscores -> dash, collapse repeated dashes
+  fn <- rownames(gex)
+  fn <- gsub("_+", "-", fn)
+  fn <- gsub("-{2,}", "-", fn)
+  rownames(gex) <- fn
+
+  # Hashtags get the sanitised region names resolved in section 2, matched by the
+  # feature reference id where possible so the order cannot silently shift.
+  hto_rows <- rownames(hto)
+  mapped <- region_levels[match(hto_rows, hto_ids)]
+  if (any(is.na(mapped))) mapped <- gsub("_", "-", hto_rows)
+  rownames(hto) <- mapped
+
+  colnames(gex) <- paste0(sample, "_", colnames(gex))
+  colnames(hto) <- colnames(gex)
+
+  obj <- CreateSeuratObject(counts = gex, project = sample,
+                            min.cells = 3, min.features = 200)
+  obj[["HTO"]] <- CreateAssayObject(counts = hto[, colnames(obj), drop = FALSE])
+
+  i <- match(sample, sample_sheet$sample)
+  obj$sample    <- sample
+  obj$condition <- as.character(sample_sheet$condition[i])
+  obj$animal    <- sample_sheet$animal[i]
+  obj$rep       <- as.character(sample_sheet$rep[i])
+  obj
+}
+
+seurat_list <- list()
+for (sample in sample_sheet$sample) {
+  message("Loading ", sample)
+  obj <- load_hashed_sample(sample)
+  if (!is.null(obj)) seurat_list[[sample]] <- obj
+}
+
+data.frame(sample = names(seurat_list),
+           cells  = vapply(seurat_list, ncol, numeric(1)),
+           row.names = NULL)
+```
+
+##5. Hashtag demultiplexing: assigning a brain region to every nucleus
+
+Hashtag counts are CLR-normalised **per feature** (`margin = 2`). This is not the
+default and it matters here: section 3 showed the four tags differ in total
+abundance by up to about fourfold, and a per-cell normalisation would leave that
+imbalance in place and bias every call toward the most abundant tag.
+
+`HTODemux` is the primary caller. Because CellBender has already removed most of the
+ambient hashtag signal, the per-cell distribution is close to binary, which is an
+easier problem than `HTODemux` was designed for but also an unusual input for its
+background fit - so `MULTIseqDemux` and a plain dominant-fraction rule are run
+alongside it and the three are compared. If they agree, the call is not
+caller-dependent and `HTODemux` stands.
+
+```{r}
+dominant_call <- function(counts_mat, min_frac = 0.6, min_total = 50) {
+  tot  <- Matrix::colSums(counts_mat)
+  frac <- sweep(as.matrix(counts_mat), 2, pmax(tot, 1), "/")
+  best <- rownames(counts_mat)[apply(frac, 2, which.max)]
+  out  <- ifelse(tot < min_total, "Negative",
+                 ifelse(apply(frac, 2, max) >= min_frac, best, "Doublet"))
+  setNames(out, colnames(counts_mat))
+}
+
+for (sample in names(seurat_list)) {
+  message("Demultiplexing ", sample)
+  obj <- seurat_list[[sample]]
+
+  obj <- NormalizeData(obj, assay = "HTO", normalization.method = "CLR",
+                       margin = 2, verbose = FALSE)
+  obj <- HTODemux(obj, assay = "HTO", positive.quantile = 0.99, verbose = FALSE)
+  obj$hto_demux <- as.character(obj$hash.ID)
+
+  obj <- MULTIseqDemux(obj, assay = "HTO", autoThresh = TRUE, verbose = FALSE)
+  obj$hto_multiseq <- as.character(obj$MULTI_ID)
+
+  obj$hto_dominant <- dominant_call(
+    GetAssayData(obj, assay = "HTO", layer = "counts")
+  )[colnames(obj)]
+
+  cat("\n---", sample, "---\n")
+  print(table(HTODemux = obj$hto_demux, MULTIseq = obj$hto_multiseq))
+  cat("HTODemux vs dominant-fraction agreement on singlets: ",
+      round(mean(obj$hto_demux[obj$hto_demux %in% region_levels] ==
+                 obj$hto_dominant[obj$hto_demux %in% region_levels]), 3), "\n")
+
+  seurat_list[[sample]] <- obj
+}
+```
+
+Diagnostics for each library: how cleanly the four tags separate, and how many
+nuclei each region contributed.
+
+```{r, fig.height=10, fig.width=14}
+for (sample in names(seurat_list)) {
+  obj <- seurat_list[[sample]]
+  Idents(obj) <- "hto_demux"
+  print(
+    RidgePlot(obj, assay = "HTO", features = rownames(obj[["HTO"]]), ncol = 2) +
+      patchwork::plot_annotation(title = paste(sample, "- hashtag CLR by call"))
+  )
+  print(HTOHeatmap(obj, assay = "HTO") + ggtitle(sample))
+}
+```
+
+```{r, fig.height=6, fig.width=14}
+# Read straight out of @meta.data and force a plain unnamed character vector, so
+# neither `$.Seurat` nor the cell names can leak into the data frame. The column is
+# called hto_call rather than `call`, which would shadow base::call.
+hto_summary <- dplyr::bind_rows(lapply(names(seurat_list), function(s) {
+  md <- seurat_list[[s]]@meta.data
+  data.frame(sample   = s,
+             hto_call = unname(as.character(md$hto_demux)),
+             row.names = NULL,
+             stringsAsFactors = FALSE)
+})) %>%
+  dplyr::count(sample, hto_call, name = "n") %>%
+  left_join(sample_sheet, by = "sample")
+
+hto_summary %>%
+  mutate(class = ifelse(hto_call %in% region_levels, "Singlet", hto_call)) %>%
+  dplyr::count(sample, class, wt = n, name = "n") %>%
+  pivot_wider(names_from = class, values_from = n, values_fill = 0) %>%
+  mutate(pct_singlet = round(100 * Singlet / (Singlet + Doublet + Negative), 1))
+
+ggplot(filter(hto_summary, hto_call %in% region_levels),
+       aes(x = sample, y = n, fill = factor(hto_call, levels = region_levels))) +
+  geom_col(position = "stack") +
+  coord_flip() +
+  scale_fill_manual(values = as.vector(pals::tableau20(4))) +
+  labs(x = NULL, y = "Singlet nuclei", fill = "Region") +
+  theme_classic(base_size = 12)
+
+ggplot(filter(hto_summary, hto_call %in% region_levels),
+       aes(x = sample, y = n, fill = factor(hto_call, levels = region_levels))) +
+  geom_col(position = "fill") +
+  coord_flip() +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = as.vector(pals::tableau20(4))) +
+  labs(x = NULL, y = "Fraction of singlet nuclei", fill = "Region") +
+  theme_classic(base_size = 12)
+```
+
+Keep the singlets, record the region, and store the hashtag doublet rate per library
+- section 7 uses it to set the DoubletFinder expectation.
+
+```{r}
+hto_rates <- list()
+
+for (sample in names(seurat_list)) {
+  obj <- seurat_list[[sample]]
+  call <- obj$hto_demux
+
+  # Rates are computed over singlets + doublets; Negative cells are excluded
+  # because they are a detection failure, not a droplet class.
+  n_singlet <- sum(call %in% region_levels)
+  n_doublet <- sum(call == "Doublet")
+  p <- prop.table(table(factor(call[call %in% region_levels], levels = region_levels)))
+
+  hto_rates[[sample]] <- list(
+    f_obs     = n_doublet / (n_singlet + n_doublet),
+    sum_p2    = sum(as.numeric(p)^2),
+    n_singlet = n_singlet,
+    n_doublet = n_doublet,
+    n_neg     = sum(call == "Negative")
+  )
+
+  keep <- colnames(obj)[call %in% region_levels]
+  obj  <- subset(obj, cells = keep)
+  obj$region <- factor(as.character(obj$hto_demux), levels = region_levels)
+  seurat_list[[sample]] <- obj
+}
+
+do.call(rbind, lapply(names(hto_rates), function(s) {
+  r <- hto_rates[[s]]
+  data.frame(sample = s, singlets = r$n_singlet, hto_doublets = r$n_doublet,
+             negatives = r$n_neg,
+             hto_doublet_rate = round(r$f_obs, 4),
+             sum_p2 = round(r$sum_p2, 3))
+}))
+```
+
+##6. Cell quality control
+
+Mitochondrial content is computed against both halves of the joint
+GRCh38-and-mm10 reference and summed, as in `analysis.Rmd` and
+`analysis_CD45.Rmd`.
+
+For **nuclei** this metric carries extra weight. A nucleus should contain almost no
+mitochondrial transcript, so whatever mitochondrial signal is present is
+cytoplasmic carry-over or ambient - exactly the contamination section 3 quantified.
+`analysis.Rmd` used `percent.mt < 5` on comparable nuclei, so 5 is the established
+value for this tissue and keeping it preserves comparability. But section 3 showed
+three to four times more ambient here than in those libraries, so 5 may well be too
+loose to do any work. The distribution is plotted first, the retention under 1 %,
+2 % and 5 % is tabulated, and `mt_cutoff` is set from that below: if the bulk of
+nuclei sit under 1-2 % then 5 is passing everything through and should be tightened.
+
+```{r}
+for (sample in names(seurat_list)) {
+  obj <- seurat_list[[sample]]
+  obj[["percent.mt.mm10"]] <- PercentageFeatureSet(obj, pattern = "mt-")
+  obj[["percent.mt.hg38"]] <- PercentageFeatureSet(obj, pattern = "MT-")
+  obj[["percent.mt"]]      <- obj[["percent.mt.mm10"]] + obj[["percent.mt.hg38"]]
+  seurat_list[[sample]] <- obj
+}
+
+qc_cells <- do.call(rbind, lapply(names(seurat_list), function(s) {
+  md <- seurat_list[[s]]@meta.data
+  data.frame(sample = s, region = md$region, percent.mt = md$percent.mt,
+             nFeature_RNA = md$nFeature_RNA, nCount_RNA = md$nCount_RNA)
+}))
+```
+
+```{r, fig.height=10, fig.width=14}
+p_mt <- ggplot(qc_cells, aes(x = sample, y = percent.mt)) +
+  geom_violin(fill = "grey85", scale = "width") +
+  geom_hline(yintercept = c(1, 2, 5), linetype = "dashed",
+             colour = c("firebrick", "darkorange", "grey40")) +
+  coord_flip() +
+  labs(x = NULL, y = "percent.mt (mm10 + hg38)",
+       subtitle = "Dashed: 1 % / 2 % / 5 %") +
+  theme_classic(base_size = 12)
+
+p_feat <- ggplot(qc_cells, aes(x = sample, y = nFeature_RNA)) +
+  geom_violin(fill = "grey85", scale = "width") +
+  scale_y_log10() + coord_flip() +
+  labs(x = NULL, y = "Genes detected (log scale)") +
+  theme_classic(base_size = 12)
+
+p_count <- ggplot(qc_cells, aes(x = sample, y = nCount_RNA)) +
+  geom_violin(fill = "grey85", scale = "width") +
+  scale_y_log10() + coord_flip() +
+  labs(x = NULL, y = "UMI after CellBender (log scale)") +
+  theme_classic(base_size = 12)
+
+p_mt + p_feat + p_count
+
+# Fraction of nuclei that each candidate cutoff would retain
+qc_cells %>%
+  group_by(sample) %>%
+  summarise(`<1%` = mean(percent.mt < 1), `<2%` = mean(percent.mt < 2),
+            `<5%` = mean(percent.mt < 5), .groups = "drop") %>%
+  mutate(across(-sample, ~ round(100 * .x, 1)))
+```
+
+```{r}
+mt_cutoff <- 3   # <- set from the distribution above
+
+for (sample in names(seurat_list)) {
+  seurat_list[[sample]] <- subset(seurat_list[[sample]],
+                                  subset = percent.mt < mt_cutoff)
+}
+data.frame(sample = names(seurat_list),
+           cells  = vapply(seurat_list, ncol, numeric(1)), row.names = NULL)
+```
+
+Human graft versus mouse host. The species call uses the majority of `GRCh38-` over
+`mm10-` counts with a 0.2-0.8 ambiguous band, the same rule as `analysis.Rmd`.
+
+Section 3 showed Cell Ranger placing the human cell partitions in the tens against
+thousands of mouse partitions, so the graft is a small minority of the nuclei in
+these libraries. That is a real constraint on what can be said about the human cells,
+and the per-library counts below are the number any downstream human-specific claim
+rests on. Note also that with roughly a quarter of counts being ambient, the
+`mixed` band here is as much a contamination readout as a genuine doublet signal.
+
+```{r}
+for (sample in names(seurat_list)) {
+  obj <- seurat_list[[sample]]
+  DefaultAssay(obj) <- "RNA"
+  cm <- GetAssayData(obj, assay = "RNA", layer = "counts")
+
+  human_umis <- Matrix::colSums(cm[grep("^GRCh38-", rownames(cm)), , drop = FALSE])
+  mouse_umis <- Matrix::colSums(cm[grep("^mm10-",   rownames(cm)), , drop = FALSE])
+  ratio      <- human_umis / (human_umis + mouse_umis)
+
+  obj$human_frac <- ratio
+  obj$species <- ifelse(human_umis > mouse_umis, "human", "mouse")
+  obj$species[ratio > 0.2 & ratio < 0.8] <- "mixed"
+
+  seurat_list[[sample]] <- obj
+}
+
+# table() requires all its arguments to be the same length, so the sample name is
+# added as a column afterwards rather than passed in as a one-element factor.
+species_tab <- dplyr::bind_rows(lapply(names(seurat_list), function(s) {
+  tb <- table(as.character(seurat_list[[s]]@meta.data$species))
+  data.frame(sample  = s,
+             species = names(tb),
+             Freq    = as.integer(tb),
+             row.names = NULL,
+             stringsAsFactors = FALSE)
+})) %>%
+  pivot_wider(names_from = species, values_from = Freq, values_fill = 0)
+species_tab
+```
+
+```{r, fig.height=5, fig.width=12}
+human_frac_df <- do.call(rbind, lapply(names(seurat_list), function(s) {
+  data.frame(sample = s, human_frac = seurat_list[[s]]$human_frac,
+             region = seurat_list[[s]]$region)
+}))
+
+ggplot(human_frac_df, aes(x = human_frac)) +
+  geom_histogram(bins = 60, fill = "grey40") +
+  geom_vline(xintercept = c(0.2, 0.8), linetype = "dashed", colour = "firebrick") +
+  scale_y_log10() +
+  facet_wrap(~ region) +
+  labs(x = "Human fraction of UMI per nucleus", y = "Nuclei (log scale)",
+       subtitle = "Dashed: bounds of the 'mixed' band") +
+  theme_classic(base_size = 12)
+```
+
+##7. Doublet removal
+
+Hashing gives an **empirical** doublet rate for each library, which is better than
+both alternatives: the 10x lookup table is a generic function of recovered cells,
+and the barnyard estimate is unusable here for the reasons given in section 3.
+
+The arithmetic. With four tags at observed singlet proportions `p`, a doublet is
+only visible to `HTODemux` if its two nuclei carried *different* tags, which happens
+with probability `1 - sum(p^2)`. So if `f_obs` is the observed hashtag-doublet
+fraction, the total doublet rate is `d = f_obs / (1 - sum(p^2))`. Section 5 already
+removed the inter-region doublets, so what remains in the object is the same-tag
+fraction, `d * sum(p^2)`, spread over the `1 - f_obs` of cells that were kept:
+
+```
+rate_remaining = d * sum(p^2) / (1 - f_obs)
+```
+
+That is what `nExp` is set from. `pK` is still estimated per library with
+`paramSweep`/`find.pK`, and the homotypic proportion is still applied **downward**
+(`nExp * (1 - homotypic)`), both following `analysis_CD45.Rmd`. Because the
+remaining doublets are by construction within-region, they are disproportionately
+homotypic, which is precisely the population `modelHomotypic` is meant to discount.
+
+`doublet_rate_10x()` is carried over unchanged and printed next to the hashtag
+estimate as a comparison, not used.
+
+```{r}
+# Expected multiplet rate as a function of recovered cells, interpolated from
+# the 10x Chromium 3' table (~0.8% per 1,000 cells, near-linear in this range).
+doublet_rate_10x <- function(n_cells) {
+  ref_cells <- c(  500,  1000,  2000,  3000,  4000,  5000,
+                  6000,  7000,  8000,  9000, 10000)
+  ref_rate  <- c(0.004, 0.008, 0.016, 0.023, 0.031, 0.039,
+                 0.046, 0.054, 0.061, 0.069, 0.076)
+  as.numeric(approx(ref_cells, ref_rate, xout = n_cells, rule = 2)$y)
+}
+
+hto_remaining_rate <- function(r) {
+  d <- r$f_obs / (1 - r$sum_p2)          # total doublet rate in the library
+  min(max(d * r$sum_p2 / (1 - r$f_obs), 0), 0.25)
+}
+
+rate_compare <- do.call(rbind, lapply(names(seurat_list), function(s) {
+  r <- hto_rates[[s]]
+  data.frame(sample = s,
+             cells          = ncol(seurat_list[[s]]),
+             hto_total_rate = round(r$f_obs / (1 - r$sum_p2), 4),
+             rate_remaining = round(hto_remaining_rate(r), 4),
+             rate_10x       = round(doublet_rate_10x(ncol(seurat_list[[s]])), 4))
+}))
+rate_compare
+```
+
+```{r}
+for (sample in names(seurat_list)) {
+  message("Doublet detection: ", sample)
+  obj <- seurat_list[[sample]]
+
+  # Light preprocessing for doublet detection (per sample, SCT)
+  DefaultAssay(obj) <- "RNA"
+  obj <- SCTransform(obj, assay = "RNA", verbose = FALSE)
+  obj <- RunPCA(obj, verbose = FALSE)
+  obj <- FindNeighbors(obj, dims = 1:10, verbose = FALSE)
+  obj <- FindClusters(obj, resolution = 0.1, verbose = FALSE)
+  obj <- RunUMAP(obj, dims = 1:10, verbose = FALSE)
+
+  umap_before <- DimPlot(obj, reduction = "umap", group.by = "seurat_clusters") +
+    ggtitle(paste(sample, "before doublet removal"))
+
+  # ---- pK estimation (per sample) ----
+  sweep_res   <- paramSweep(obj, PCs = 1:10, sct = TRUE)
+  sweep_stats <- summarizeSweep(sweep_res, GT = FALSE)
+  bcmvn       <- find.pK(sweep_stats)
+  pK <- as.numeric(as.character(bcmvn$pK[which.max(bcmvn$BCmetric)]))
+  if (is.na(pK) || length(pK) == 0) pK <- 0.09  # fall back to the fixed value
+  message("  pK = ", pK)
+  pN <- 0.25
+
+  # ---- expected number of doublets, from the hashtags ----
+  rate <- hto_remaining_rate(hto_rates[[sample]])
+
+  # modelHomotypic needs a clustering fine enough to separate cell types; the
+  # res = 0.1 used for the QC UMAP is too coarse and inflates the homotypic
+  # estimate. A finer clustering is computed here for this purpose only.
+  obj <- FindClusters(obj, resolution = 0.8,
+                      cluster.name = "clusters_for_homotypic", verbose = FALSE)
+  homotypic <- modelHomotypic(obj$clusters_for_homotypic)
+
+  nExp_poi <- round(rate * ncol(obj))
+  nExp_adj <- round(nExp_poi * (1 - homotypic))
+  message("  cells = ", ncol(obj),
+          ", hashtag rate = ", signif(rate, 3),
+          " (10x table would give ", signif(doublet_rate_10x(ncol(obj)), 3), ")",
+          ", homotypic = ", signif(homotypic, 3),
+          ", nExp = ", nExp_poi, " -> ", nExp_adj)
+
+  if (nExp_adj < 1) {
+    message("  nExp_adj < 1, no DoubletFinder doublets to call")
+    obj$doublet_class <- "Singlet"
+    obj$doublet_pANN  <- NA_real_
+  } else {
+    obj <- doubletFinder(obj, PCs = 1:10, pN = pN, pK = pK,
+                         nExp = nExp_poi, reuse.pANN = NULL, sct = TRUE)
+
+    df_col <- grep("^pANN_", colnames(obj@meta.data), value = TRUE)[1]
+    if (is.na(df_col)) stop("DoubletFinder pANN metadata not found")
+
+    obj <- doubletFinder(obj, PCs = 1:10, pN = pN, pK = pK,
+                         nExp = nExp_adj, reuse.pANN = df_col, sct = TRUE)
+
+    # The adjusted classification is the one keyed to nExp_adj; select it by name
+    # rather than by position so the choice does not depend on column ordering.
+    df_class_col <- grep(paste0("^DF.classifications_.*_", nExp_adj, "$"),
+                         colnames(obj@meta.data), value = TRUE)
+    if (length(df_class_col) == 0) {
+      df_class_col <- tail(grep("^DF.classifications_",
+                                colnames(obj@meta.data), value = TRUE), 1)
+    }
+    if (length(df_class_col) == 0) stop("DoubletFinder classification not found")
+    message("  using ", df_class_col)
+
+    obj$doublet_class <- obj@meta.data[[df_class_col]]
+    obj$doublet_pANN  <- obj@meta.data[[df_col]]
+  }
+
+  # Diagnostic: where do the called doublets sit? A cluster that is almost
+  # entirely doublet-called is a real doublet cluster; doublets scattered
+  # evenly across all clusters suggest the rate is set too high.
+  print(DimPlot(obj, reduction = "umap", group.by = "doublet_class") +
+          ggtitle(paste(sample, "doublet calls")))
+  print(table(cluster = obj$seurat_clusters, call = obj$doublet_class))
+  print(VlnPlot(obj, features = c("nFeature_RNA", "nCount_RNA"),
+                group.by = "doublet_class", pt.size = 0) +
+          patchwork::plot_annotation(title = paste(sample, "complexity by call")))
+
+  sel_singlets <- obj$doublet_class == "Singlet"
+  if (sum(sel_singlets, na.rm = TRUE) == 0) {
+    stop("No cells annotated as Singlet in ", sample)
+  }
+  obj <- subset(obj, cells = colnames(obj)[which(sel_singlets)])
+
+  # Recompute after doublet removal
+  DefaultAssay(obj) <- "RNA"
+  obj[["SCT"]] <- NULL
+  obj <- SCTransform(obj, assay = "RNA", verbose = FALSE)
+  obj <- RunPCA(obj, verbose = FALSE)
+  obj <- FindNeighbors(obj, dims = 1:10, verbose = FALSE)
+  obj <- FindClusters(obj, resolution = 0.1, verbose = FALSE)
+  obj <- RunUMAP(obj, dims = 1:10, verbose = FALSE)
+
+  umap_after <- DimPlot(obj, reduction = "umap", group.by = "seurat_clusters") +
+    ggtitle(paste(sample, "after doublet removal"))
+
+  print(umap_before + umap_after)
+
+  seurat_list[[sample]] <- obj
+}
+```
+
+Record how many nuclei each library lost, so an outlying sample is visible before it
+influences the merged object. The `rep1`/`rep2` pairs should track each other - they
+are the same suspension.
+
+```{r, fig.height=6, fig.width=12}
+doublet_summary <- do.call(rbind, lapply(names(seurat_list), function(s) {
+  data.frame(sample = s, cells_retained = ncol(seurat_list[[s]]))
+}))
+doublet_summary <- left_join(doublet_summary, sample_sheet, by = "sample")
+doublet_summary
+
+ggplot(doublet_summary, aes(x = animal, y = cells_retained, fill = rep)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  facet_wrap(~ condition, scales = "free_y", ncol = 1) +
+  labs(x = NULL, y = "Nuclei retained after doublet removal", fill = NULL) +
+  theme_classic(base_size = 12)
+```
+
+##8. Merge and cluster: the global object
+
+```{r}
+humanized_mouse_hashing <- Reduce(function(x, y) merge(x, y), seurat_list)
+rm(seurat_list); gc()
+
+# Remove per-sample doublet-detection metadata, which is meaningless once the
+# libraries are merged (the columns are keyed to each sample's own nExp), along
+# with the per-library HTO classifications superseded by `region`.
+md <- humanized_mouse_hashing@meta.data
+drop_cols <- grep(paste0("^(pANN_|DF.classifications_|nCount_SCT|nFeature_SCT|",
+                         "SCT_snn_res|seurat_clusters|clusters_for_homotypic|",
+                         "HTO_|hash.ID|MULTI_)"),
+                  colnames(md), value = TRUE)
+for (cc in drop_cols) humanized_mouse_hashing@meta.data[[cc]] <- NULL
+
+humanized_mouse_hashing <- subset(humanized_mouse_hashing,
+                                  subset = percent.mt < mt_cutoff)
+humanized_mouse_hashing
+
+table(humanized_mouse_hashing$region, humanized_mouse_hashing$condition)
+```
+
+Normalisation follows the other vignettes: a log-normalised RNA branch (kept for
+marker plots and for the pseudobulk step, which reads raw counts) and an SCT branch
+used for dimensionality reduction and clustering.
+
+```{r}
+options(future.globals.maxSize = 100e+09)
+
+DefaultAssay(humanized_mouse_hashing) <- "RNA"
+
+humanized_mouse_hashing[["SCT"]] <- NULL
+
+# Log-normalized analysis on RNA
+humanized_mouse_hashing <- NormalizeData(humanized_mouse_hashing, assay = "RNA")
+humanized_mouse_hashing <- FindVariableFeatures(humanized_mouse_hashing, assay = "RNA")
+humanized_mouse_hashing <- ScaleData(humanized_mouse_hashing, assay = "RNA")
+humanized_mouse_hashing <- RunPCA(humanized_mouse_hashing, assay = "RNA",
+                                  reduction.name = "pca_lognorm")
+
+# SCT analysis on SCT assay
+humanized_mouse_hashing <- SCTransform(humanized_mouse_hashing, assay = "RNA",
+                                       verbose = TRUE)
+humanized_mouse_hashing <- FindVariableFeatures(humanized_mouse_hashing, assay = "SCT")
+humanized_mouse_hashing <- RunPCA(humanized_mouse_hashing, assay = "SCT",
+                                  reduction.name = "pca_SCT")
+```
+
+Read the elbow before fixing `n_dims`. These are whole-brain nuclei spanning four
+regions, so the closest precedent is the unhashed whole-hemisphere analysis in
+`analysis.Rmd` rather than the sorted CD45+ populations; expect a similar elbow to
+the former.
+
+```{r}
+ElbowPlot(humanized_mouse_hashing, reduction = "pca_SCT", ndims = 50)
+```
+
+```{r}
+n_dims <- 40  # <- set from the elbow plot above
+
+humanized_mouse_hashing <- FindNeighbors(humanized_mouse_hashing, dims = 1:n_dims,
+                                         reduction = "pca_SCT")
+humanized_mouse_hashing <- FindClusters(humanized_mouse_hashing, resolution = 0.1,
+                                        cluster.name = "unintegrated_clusters")
+humanized_mouse_hashing <- RunUMAP(humanized_mouse_hashing, dims = 1:n_dims,
+                                   reduction = "pca_SCT",
+                                   reduction.name = "umap.unintegrated")
+```
+
+```{r, fig.height=12, fig.width=18}
+my_colors <- as.vector(pals::polychrome(36))
+
+p1 <- DimPlot(humanized_mouse_hashing, reduction = "umap.unintegrated",
+              group.by = "unintegrated_clusters", cols = my_colors,
+              label = TRUE) + labs(x = "UMAP 1", y = "UMAP 2")
+p2 <- DimPlot(humanized_mouse_hashing, reduction = "umap.unintegrated",
+              group.by = "region") + labs(x = "UMAP 1", y = "UMAP 2")
+p3 <- DimPlot(humanized_mouse_hashing, reduction = "umap.unintegrated",
+              group.by = "condition") + labs(x = "UMAP 1", y = "UMAP 2")
+p4 <- DimPlot(humanized_mouse_hashing, reduction = "umap.unintegrated",
+              group.by = "species") + labs(x = "UMAP 1", y = "UMAP 2")
+(p1 + p2) / (p3 + p4)
+```
+
+Cluster composition. Four panels, each answering a different question:
+
+* **by region** - does the demultiplexing produce the regional structure it should?
+  Cerebellar granule cells confined to Cerebellum is the positive control.
+* **by animal** - a cluster carried by a single animal is a batch effect candidate,
+  not a biological population.
+* **by rep** - `rep1` and `rep2` are the same suspension, so any cluster split
+  between them is a channel artefact.
+* **by library, restricted to the flagged samples from section 3** - a cluster
+  carried by the libraries whose ambient profile is least constrained is an ambient
+  artefact candidate.
+
+```{r, fig.height=14, fig.width=16}
+comp <- function(var, lab) {
+  df <- as.data.frame(table(cluster = humanized_mouse_hashing$unintegrated_clusters,
+                            grp = humanized_mouse_hashing@meta.data[[var]]))
+  ggplot(df, aes(x = cluster, y = Freq, fill = grp)) +
+    geom_col(position = "fill") + scale_y_continuous(labels = percent) +
+    labs(x = "Cluster", y = "Fraction of nuclei", fill = lab) +
+    theme_classic(base_size = 13)
+}
+
+humanized_mouse_hashing$is_flagged <- ifelse(
+  humanized_mouse_hashing$sample %in% flagged_samples,
+  "weak ambient fit", "other")
+
+comp("region", "Region") / comp("animal", "Animal") /
+  comp("rep", "Replicate") / comp("is_flagged", "Section 3 flag")
+```
+
+Cluster markers.
+
+```{r}
+DefaultAssay(humanized_mouse_hashing) <- "SCT"
+humanized_mouse_hashing <- PrepSCTFindMarkers(humanized_mouse_hashing)
+hashing_markers <- FindAllMarkers(humanized_mouse_hashing, only.pos = TRUE)
+
+write.xlsx(hashing_markers,
+           file.path(markers_dir, "hashing_global_markers.xlsx"),
+           overwrite = TRUE)
+hashing_markers %>% group_by(cluster) %>% slice_max(avg_log2FC, n = 10)
+```
+
+Because these are whole-brain nuclei from the same model as the already-annotated
+object built in `analysis.Rmd`, the labels there are a legitimate starting point
+rather than a guess. Transfer them and read the result as a confusion matrix against
+the clustering above. The gene-name normalisation in section 4 was kept
+byte-identical to that vignette precisely so this join works.
+
+This is a **starting point, not the annotation**: a transferred label inherits the
+reference's mistakes and has nothing to say about a population absent from it. The
+markers written above are the evidence; the named vector below is where the call
+gets made.
+
+```{r}
+ref_candidates <- file.path(obj_dir, c("humanized_mouse_brain_whole_doublets.rds",
+                                       "humanized_mouse_brain.rds"))
+ref_path <- ref_candidates[file.exists(ref_candidates)][1]
+
+if (!is.na(ref_path)) {
+  message("Transferring labels from ", ref_path)
+  ref <- readRDS(ref_path)
+
+  label_col <- intersect(c("broad_clustering", "broad_clusters", "fine_clusters"),
+                         colnames(ref@meta.data))[1]
+  if (is.na(label_col)) {
+    warning("No known label column in the reference; skipping transfer")
+  } else {
+    DefaultAssay(ref) <- "SCT"
+    anchors <- FindTransferAnchors(
+      reference = ref, query = humanized_mouse_hashing,
+      normalization.method = "SCT", reference.reduction = "pca",
+      dims = 1:n_dims
+    )
+    pred <- TransferData(anchorset = anchors,
+                         refdata = as.character(ref@meta.data[[label_col]]),
+                         dims = 1:n_dims)
+    humanized_mouse_hashing$transferred_label <- pred$predicted.id
+    humanized_mouse_hashing$transfer_score    <- pred$prediction.score.max
+
+    print(table(cluster = humanized_mouse_hashing$unintegrated_clusters,
+                transferred = humanized_mouse_hashing$transferred_label))
+  }
+  rm(ref); gc()
+} else {
+  warning("No reference object found under ", obj_dir, "; skipping label transfer")
+}
+```
+
+```{r, fig.height=6, fig.width=16}
+if ("transferred_label" %in% colnames(humanized_mouse_hashing@meta.data)) {
+  t1 <- DimPlot(humanized_mouse_hashing, reduction = "umap.unintegrated",
+                group.by = "transferred_label", cols = my_colors, label = TRUE,
+                repel = TRUE) + labs(x = "UMAP 1", y = "UMAP 2")
+  t2 <- FeaturePlot(humanized_mouse_hashing, reduction = "umap.unintegrated",
+                    features = "transfer_score") +
+    labs(x = "UMAP 1", y = "UMAP 2")
+  t1 + t2
+}
+```
+
+Annotation. Fill the vectors below from the marker table and the transferred labels,
+then drop any cluster that turns out to be ambient contamination rather than a
+population - the equivalent of the cluster dropped in `analysis_CD45.Rmd`. With
+about a quarter of counts ambient in these libraries, expect at least one such
+cluster: it will have low `nFeature_RNA`, no specific positive markers, a flat
+profile resembling the library average, and spread evenly across all four regions.
+
+```{r, fig.height=6, fig.width=14}
+# Evidence for the ambient-contamination call, read alongside the marker table
+VlnPlot(humanized_mouse_hashing, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+        group.by = "unintegrated_clusters", pt.size = 0, ncol = 1)
+```
+
+```{r}
+# ---- Fill these in before running the rest of the vignette ----------------
+# Clusters judged to be ambient contamination / low-quality, to be removed.
+ambient_clusters <- c()   # e.g. c("13")
+
+if (length(ambient_clusters) > 0) {
+  Idents(humanized_mouse_hashing) <- "unintegrated_clusters"
+  keep_ids <- setdiff(levels(humanized_mouse_hashing$unintegrated_clusters),
+                      ambient_clusters)
+  humanized_mouse_hashing <- subset(humanized_mouse_hashing, idents = keep_ids)
+  humanized_mouse_hashing$unintegrated_clusters <-
+    droplevels(humanized_mouse_hashing$unintegrated_clusters)
+}
+
+Idents(humanized_mouse_hashing) <- "unintegrated_clusters"
+
+# Fine annotation: one entry per remaining cluster id.
+fine_global <- c(
+  # "0" = "Cerebellar granule cells",
+  # "1" = "Excitatory cortical neurons",
+  # ...
+)
+
+# Broad / lineage annotation: one entry per fine label.
+lineage_global <- c(
+  # "Cerebellar granule cells"    = "Neuron",
+  # "Excitatory cortical neurons" = "Neuron",
+  # ...
+)
+
+if (length(fine_global) > 0) {
+  stopifnot(setequal(names(fine_global),
+                     levels(humanized_mouse_hashing$unintegrated_clusters)))
+  humanized_mouse_hashing <- RenameIdents(humanized_mouse_hashing, fine_global)
+  humanized_mouse_hashing$fine_clusters <- Idents(humanized_mouse_hashing)
+
+  if (length(lineage_global) > 0) {
+    stopifnot(setequal(names(lineage_global), unname(fine_global)))
+    humanized_mouse_hashing <- RenameIdents(humanized_mouse_hashing, lineage_global)
+    humanized_mouse_hashing$broad_clusters <- Idents(humanized_mouse_hashing)
+  }
+  table(humanized_mouse_hashing$fine_clusters)
+} else {
+  message("fine_global is empty - the vignette will use unintegrated_clusters ",
+          "as the cluster label throughout.")
+}
+
+# The cluster column every downstream section keys on.
+cluster_col_global <- if ("fine_clusters" %in% colnames(humanized_mouse_hashing@meta.data)) {
+  "fine_clusters"
+} else {
+  "unintegrated_clusters"
+}
+cluster_col_global
+
+saveRDS(humanized_mouse_hashing,
+        file.path(obj_dir, "humanized_mouse_hashing_SCT.rds"))
+```
+
+Export UMAP coordinates and metadata.
+
+```{r}
+wb <- createWorkbook()
+md <- humanized_mouse_hashing@meta.data
+md$barcode <- colnames(humanized_mouse_hashing)
+df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                 check.names = FALSE, stringsAsFactors = FALSE)
+addWorksheet(wb, "hashing")
+writeData(wb, "hashing", df)
+saveWorkbook(wb, file.path(res_dir, "hashing_metadata.xlsx"), overwrite = TRUE)
+cat(sprintf("  hashing : %d nuclei x %d metadata columns\n", nrow(df), ncol(df) - 1))
+
+wb <- createWorkbook()
+emb <- humanized_mouse_hashing@reductions$umap.unintegrated@cell.embeddings
+df  <- data.frame(cell = rownames(emb), emb, row.names = NULL,
+                  check.names = FALSE, stringsAsFactors = FALSE)
+addWorksheet(wb, "hashing")
+writeData(wb, "hashing", df)
+saveWorkbook(wb, file.path(res_dir, "hashing_UMAP_coordinates.xlsx"),
+             overwrite = TRUE)
+```
+
+Save the full count matrix for future use.
+
+```{r}
+library("zellkonverter")
+library(SingleCellExperiment)
+sce <- as.SingleCellExperiment(humanized_mouse_hashing, assay = "RNA")
+writeH5AD(sce, file.path(res_dir, "humanized_mouse_hashing.h5ad"))
+
+library(Matrix); library(data.table)
+
+obj <- humanized_mouse_hashing
+DefaultAssay(obj) <- "RNA"
+obj <- JoinLayers(obj)
+mat <- GetAssayData(obj, assay = "RNA", layer = "data")   # or layer = "counts" for raw
+
+outfile <- file.path(res_dir, "hashing_Count_Matrix.csv.gz")
+dir.create(dirname(outfile), recursive = TRUE, showWarnings = FALSE)
+
+chunk <- 2000
+idx   <- split(seq_len(ncol(mat)), ceiling(seq_len(ncol(mat)) / chunk))
+
+for (i in seq_along(idx)) {
+  blk <- as.matrix(t(mat[, idx[[i]], drop = FALSE]))    # cells x genes
+  dt  <- data.table(cell = rownames(blk), blk)
+  fwrite(dt, outfile, append = i > 1, col.names = i == 1, compress = "gzip")
+  message("chunk ", i, "/", length(idx))
+}
+rm(obj, mat); gc()
+```
+
+##9. Reclustering within each brain region
+
+Same loop as the per-tissue reclustering in `analysis_CD45.Rmd`, over the four
+hashtag-defined regions. Each region gets its own normalisation, embedding and
+clustering, so a population that is a minor subset globally can resolve into
+substructure where it actually lives. The global object from section 8 is kept
+intact alongside these.
+
+```{r}
+regions <- levels(droplevels(factor(humanized_mouse_hashing$region)))
+
+region_objects <- list()
+
+for (bc in regions) {
+  obj_name <- make.names(bc)
+  message("Processing region: ", bc, " --> ", obj_name)
+
+  RS <- subset(humanized_mouse_hashing, subset = region == bc)
+
+  DefaultAssay(RS) <- "RNA"
+  RS[["SCT"]] <- NULL
+  RS <- SCTransform(RS, assay = "RNA", vst.flavor = "v2", verbose = FALSE)
+  RS <- RunPCA(RS, verbose = FALSE,
+               reduction.name = paste0("pca", obj_name, "_SCT"))
+  RS <- FindNeighbors(RS, reduction = paste0("pca", obj_name, "_SCT"),
+                      dims = 1:n_dims,
+                      graph.name = c(paste0(obj_name, "_nn"),
+                                     paste0(obj_name, "_snn")))
+  RS <- FindClusters(RS, resolution = 0.5,
+                     graph.name = paste0(obj_name, "_snn"),
+                     cluster.name = paste0(obj_name, "_clusters"))
+  RS <- RunUMAP(RS, reduction = paste0("pca", obj_name, "_SCT"), dims = 1:n_dims,
+                reduction.name = paste0("umap_", obj_name))
+
+  region_objects[[obj_name]] <- RS
+  saveRDS(RS, file = file.path(obj_dir, paste0(obj_name, "_hashing_SCT.rds")))
+
+  # markers
+  DefaultAssay(RS) <- "SCT"
+  RS <- PrepSCTFindMarkers(RS, assay = "SCT", verbose = FALSE)
+  RS_markers <- FindAllMarkers(RS, only.pos = TRUE)
+
+  wb <- createWorkbook()
+  for (cluster_value in unique(RS_markers$cluster)) {
+    cluster_data <- subset(RS_markers, cluster == cluster_value)
+    sheet_name <- paste0("Cluster_", cluster_value)
+    addWorksheet(wb, sheet_name)
+    writeData(wb, sheet_name, cluster_data)
+  }
+  saveWorkbook(wb, file.path(markers_dir, paste0(obj_name, "_hashing_markers.xlsx")),
+               overwrite = TRUE)
+}
+```
+
+```{r, fig.height=12, fig.width=16}
+plots <- lapply(names(region_objects), function(mk) {
+  DimPlot(region_objects[[mk]], reduction = paste0("umap_", mk),
+          group.by = paste0(mk, "_clusters"), cols = my_colors, label = TRUE) +
+    ggtitle(mk) + labs(x = "UMAP 1", y = "UMAP 2")
+})
+patchwork::wrap_plots(plots, ncol = 2)
+```
+
+```{r, fig.height=12, fig.width=16}
+plots <- lapply(names(region_objects), function(mk) {
+  DimPlot(region_objects[[mk]], reduction = paste0("umap_", mk),
+          group.by = "condition") +
+    ggtitle(mk) + labs(x = "UMAP 1", y = "UMAP 2")
+})
+patchwork::wrap_plots(plots, ncol = 2)
+```
+
+Save UMAP coordinates and metadata for the per-region objects.
+
+```{r}
+cat("regions:", paste(names(region_objects), collapse = ", "), "\n")
+
+wb <- createWorkbook()
+for (mk in names(region_objects)) {
+  md <- region_objects[[mk]]@meta.data
+  md$barcode <- colnames(region_objects[[mk]])
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+  cat(sprintf("  %-16s : %d nuclei x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+}
+saveWorkbook(wb, file.path(res_dir, "Reclustering_hashing_metadata.xlsx"),
+             overwrite = TRUE)
+
+wb <- createWorkbook()
+for (mk in names(region_objects)) {
+  emb <- region_objects[[mk]]@reductions[[paste0("umap_", mk)]]@cell.embeddings
+  df  <- data.frame(cell = rownames(emb), emb, row.names = NULL,
+                    check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+}
+saveWorkbook(wb, file.path(res_dir, "Reclustering_hashing_UMAP.xlsx"),
+             overwrite = TRUE)
+```
+
+##10. Differential gene expression: EAE-NonSymp vs CFA
+
+Pseudobulk DESeq2 within each cluster, with the **animal** as the unit of
+replication. Three features of this design need handling:
+
+* **`rep1` and `rep2` are the same animal.** The pseudobulk key is
+  `animal x region`, not `sample x region`, so the two channels are summed into one
+  profile. Treating them as separate columns would double the apparent sample size
+  while adding no biological information, and would make every p-value
+  anticonservative.
+* **Each animal contributed four regions.** Aggregating per animal x region and
+  fitting `~ region + condition` blocks the region effect while keeping the
+  condition term estimated across animals. Region is dropped automatically when a
+  cluster is confined to one region, which would otherwise leave the model
+  rank-deficient.
+* **`EAE-Symp` has n = 1** and is excluded from testing. It is summarised separately
+  in section 11 without p-values.
+
+CFA is the reference level, so a positive log2FC means higher in EAE.
+
+```{r}
+run_pseudobulk_dge_hashing <- function(seurat_obj,
+                                       cluster_col,
+                                       cluster_id,
+                                       test_conditions  = c("CFA", "EAE-NonSymp"),
+                                       animal_col       = "animal",
+                                       region_col       = "region",
+                                       condition_col    = "condition",
+                                       use_region       = TRUE,
+                                       min_cells        = 10,
+                                       min_cells_per_pb = 10,
+                                       min_counts       = 10) {
+
+  idx <- seurat_obj@meta.data[[cluster_col]] == cluster_id &
+    as.character(seurat_obj@meta.data[[condition_col]]) %in% test_conditions
+  if (sum(idx, na.rm = TRUE) < min_cells) {
+    message("Skipping cluster ", cluster_id, ": only ", sum(idx, na.rm = TRUE),
+            " testable nuclei")
+    return(NULL)
+  }
+
+  sub_obj <- seurat_obj[, which(idx)]
+  DefaultAssay(sub_obj) <- "RNA"
+  sub_obj <- JoinLayers(sub_obj)
+  counts_mat <- GetAssayData(sub_obj, assay = "RNA", layer = "counts")
+  meta <- sub_obj@meta.data
+
+  # One pseudobulk profile per animal x region. rep1 and rep2 are the same
+  # animal, so they are summed here rather than kept apart.
+  pb_group <- if (use_region) {
+    paste(meta[[animal_col]], meta[[region_col]], sep = "__")
+  } else {
+    as.character(meta[[animal_col]])
+  }
+
+  keep_groups <- names(which(table(pb_group) >= min_cells_per_pb))
+  if (length(keep_groups) < 4) {
+    message("Skipping cluster ", cluster_id,
+            ": fewer than 4 usable pseudobulk groups")
+    return(NULL)
+  }
+
+  pb_mat <- vapply(keep_groups, function(g) {
+    as.numeric(Matrix::rowSums(counts_mat[, pb_group == g, drop = FALSE]))
+  }, numeric(nrow(counts_mat)))
+  rownames(pb_mat) <- rownames(counts_mat)
+
+  col_meta <- data.frame(
+    group     = keep_groups,
+    animal    = if (use_region) sub("__.*$", "", keep_groups) else keep_groups,
+    row.names = keep_groups,
+    stringsAsFactors = FALSE
+  )
+  if (use_region) {
+    col_meta$region <- factor(sub("^.*__", "", keep_groups))
+  }
+  col_meta$condition <- factor(
+    vapply(col_meta$animal, function(a)
+      unique(as.character(meta[[condition_col]][meta[[animal_col]] == a]))[1],
+      character(1)),
+    levels = test_conditions
+  )
+
+  # Require at least two animals per condition, or the dispersion estimate is
+  # not identifiable and the test is not interpretable.
+  n_animals <- tapply(col_meta$animal, col_meta$condition,
+                      function(x) length(unique(x)))
+  if (any(is.na(n_animals)) || any(n_animals < 2)) {
+    message("Skipping cluster ", cluster_id,
+            ": fewer than 2 animals in one condition")
+    return(NULL)
+  }
+
+  if (use_region) {
+    col_meta$region <- droplevels(col_meta$region)
+    ok_region <- nlevels(col_meta$region) > 1 &&
+      !any(rowSums(table(col_meta$region, col_meta$condition) > 0) < 2)
+    design <- if (ok_region) ~ region + condition else ~ condition
+  } else {
+    design <- ~ condition
+  }
+  message("Cluster ", cluster_id, ": ", nrow(col_meta),
+          " pseudobulk groups, design ", deparse(design))
+
+  pb_mat <- pb_mat[rowSums(pb_mat) >= min_counts, , drop = FALSE]
+  if (nrow(pb_mat) < 10) {
+    message("Skipping cluster ", cluster_id, ": too few expressed genes")
+    return(NULL)
+  }
+
+  tryCatch({
+    dds <- DESeqDataSetFromMatrix(countData = round(pb_mat),
+                                  colData   = col_meta,
+                                  design    = design)
+    dds <- DESeq(dds, quiet = TRUE)
+    res <- results(dds, contrast = c("condition", test_conditions[2],
+                                     test_conditions[1]))
+    res_df <- as.data.frame(res)
+    res_df$gene    <- rownames(res_df)
+    res_df$cluster <- as.character(cluster_id)
+    res_df$design  <- deparse(design)
+    res_df$n_pb    <- nrow(col_meta)
+    res_df[order(res_df$padj, na.last = TRUE), ]
+  }, error = function(e) {
+    message("DESeq2 error - cluster ", cluster_id, ": ", conditionMessage(e))
+    NULL
+  })
+}
+
+# Volcano plot helper, as in analysis.Rmd
+plot_volcano <- function(res_df, cluster_label,
+                         padj_thresh = 0.05, lfc_thresh = 0.5, top_n = 15) {
+  df <- res_df %>%
+    filter(!is.na(padj), !is.na(log2FoldChange)) %>%
+    mutate(
+      sig = case_when(
+        padj < padj_thresh & log2FoldChange >  lfc_thresh ~ "Up in EAE",
+        padj < padj_thresh & log2FoldChange < -lfc_thresh ~ "Up in CFA",
+        TRUE ~ "NS"
+      )
+    ) %>%
+    mutate(label = ifelse(sig != "NS" & rank(padj, ties.method = "first") <= top_n,
+                          gene, NA_character_))
+
+  n_up <- sum(df$sig == "Up in EAE")
+  n_dn <- sum(df$sig == "Up in CFA")
+
+  ggplot(df, aes(x = log2FoldChange, y = -log10(padj), color = sig)) +
+    geom_point(alpha = 0.6, size = 1.5) +
+    ggrepel::geom_text_repel(aes(label = label), size = 3, max.overlaps = 20,
+                             na.rm = TRUE) +
+    scale_color_manual(
+      values = c("Up in EAE" = "firebrick", "Up in CFA" = "steelblue", "NS" = "grey70")
+    ) +
+    geom_vline(xintercept = c(-lfc_thresh, lfc_thresh), linetype = "dashed",
+               colour = "grey40") +
+    geom_hline(yintercept = -log10(padj_thresh), linetype = "dashed",
+               colour = "grey40") +
+    annotate("text", x = Inf,  y = Inf, hjust = 1.1, vjust = 1.0,
+             label = paste0("Up in EAE: ", n_up), color = "firebrick",
+             size = 4.5, fontface = "bold") +
+    annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.0,
+             label = paste0("Up in CFA: ", n_dn), color = "steelblue",
+             size = 4.5, fontface = "bold") +
+    labs(
+      title = paste("EAE-NonSymp vs CFA -", cluster_label),
+      x     = "log2 Fold Change (EAE / CFA)",
+      y     = "-log10(adjusted p-value)",
+      color = NULL
+    ) +
+    theme_classic() +
+    theme(
+      plot.title  = element_text(hjust = 0.5, size = 16, face = "bold"),
+      axis.text   = element_text(size = 12),
+      axis.title  = element_text(size = 14),
+      legend.text = element_text(size = 12)
+    )
+}
+```
+
+###10.1 Pooled across regions, blocking on region
+
+Maximum power per cluster: all four regions contribute, and the region term absorbs
+the regional baseline differences. A region-restricted effect will be diluted here,
+which is what section 10.2 is for.
+
+```{r}
+cluster_ids_global <- levels(droplevels(factor(
+  humanized_mouse_hashing@meta.data[[cluster_col_global]])))
+
+dge_pooled <- lapply(cluster_ids_global, function(cl) {
+  message("[pooled] Running DGE for cluster: ", cl)
+  tryCatch(
+    run_pseudobulk_dge_hashing(
+      seurat_obj  = humanized_mouse_hashing,
+      cluster_col = cluster_col_global,
+      cluster_id  = cl,
+      use_region  = TRUE
+    ),
+    error = function(e) { message("  skipped: ", conditionMessage(e)); NULL }
+  )
+})
+names(dge_pooled) <- cluster_ids_global
+
+wb_pooled <- createWorkbook()
+for (cl in names(dge_pooled)) {
+  res <- dge_pooled[[cl]]
+  if (is.null(res) || nrow(res) == 0) next
+  sheet_name <- substr(gsub("[\\[\\]:*?/\\\\]", "_", paste0("Cluster_", cl)), 1, 31)
+  addWorksheet(wb_pooled, sheet_name)
+  writeData(wb_pooled, sheet_name, res)
+}
+if (length(names(wb_pooled)) > 0) {
+  saveWorkbook(wb_pooled,
+    file.path(res_dir, "DGE_EAE-NonSymp_vs_CFA_hashing_global_clusters.xlsx"),
+    overwrite = TRUE)
+  cat("Saved pooled DGE results.\n")
+} else {
+  message("No pooled results - nothing saved.")
+}
+```
+
+```{r, fig.height=6, fig.width=8}
+for (cl in names(dge_pooled)) {
+  if (!is.null(dge_pooled[[cl]]) && sum(!is.na(dge_pooled[[cl]]$padj)) > 0) {
+    p <- plot_volcano(dge_pooled[[cl]], cl)
+    ggplot2::ggsave(
+      file.path(plots_dir,
+                paste0("volcano_DGE_hashing_pooled_", make.names(cl), ".png")),
+      p, width = 8, height = 6, dpi = 300
+    )
+    print(p)
+  }
+}
+```
+
+###10.2 Stratified per region
+
+Subset to each region, then test within each of that region's own clusters, 3 vs 3
+animals. This is the comparison to report when a cluster behaves differently in
+Cerebellum, Olfactory Bulb, Striatum and Cortex. `use_region = FALSE` because there
+is only one region left inside each subset.
+
+```{r}
+dge_by_region <- list()
+for (mk in names(region_objects)) {
+  obj_reg  <- region_objects[[mk]]
+  clus_col <- paste0(mk, "_clusters")
+  for (cl in levels(droplevels(factor(obj_reg@meta.data[[clus_col]])))) {
+    key <- paste(mk, cl, sep = "_cluster")
+    message("Running DGE for ", key)
+    dge_by_region[[key]] <- tryCatch(
+      run_pseudobulk_dge_hashing(
+        seurat_obj  = obj_reg,
+        cluster_col = clus_col,
+        cluster_id  = cl,
+        use_region  = FALSE
+      ),
+      error = function(e) { message("  skipped: ", conditionMessage(e)); NULL }
+    )
+  }
+}
+
+wb_region <- createWorkbook()
+for (key in names(dge_by_region)) {
+  if (!is.null(dge_by_region[[key]])) {
+    sheet_name <- substr(gsub("[\\[\\]:*?/\\\\]", "_", key), 1, 31)
+    addWorksheet(wb_region, sheet_name)
+    writeData(wb_region, sheet_name, dge_by_region[[key]])
+  }
+}
+if (length(names(wb_region)) > 0) {
+  saveWorkbook(wb_region,
+               file.path(res_dir, "DGE_EAE-NonSymp_vs_CFA_hashing_by_region.xlsx"),
+               overwrite = TRUE)
+  cat("Saved per-region DGE results.\n")
+} else {
+  message("No per-region results - nothing saved.")
+}
+```
+
+```{r, fig.height=6, fig.width=8}
+for (key in names(dge_by_region)) {
+  if (!is.null(dge_by_region[[key]]) && sum(!is.na(dge_by_region[[key]]$padj)) > 0) {
+    p <- plot_volcano(dge_by_region[[key]], key)
+    ggplot2::ggsave(
+      file.path(plots_dir, paste0("volcano_DGE_hashing_", make.names(key), ".png")),
+      p, width = 8, height = 6, dpi = 300
+    )
+    print(p)
+  }
+}
+```
+
+###10.3 Summary and pseudobulk QC
+
+Number of significant genes per cluster, both analyses side by side.
+
+```{r}
+count_sig <- function(lst, label) {
+  do.call(rbind, lapply(names(lst), function(k) {
+    r <- lst[[k]]
+    if (is.null(r)) return(data.frame(key = k, analysis = label,
+                                      up = NA_integer_, down = NA_integer_,
+                                      n_pb = NA_integer_))
+    data.frame(key = k, analysis = label,
+               up   = sum(r$padj < 0.05 & r$log2FoldChange >  0.5, na.rm = TRUE),
+               down = sum(r$padj < 0.05 & r$log2FoldChange < -0.5, na.rm = TRUE),
+               n_pb = r$n_pb[1])
+  }))
+}
+
+dge_summary <- rbind(count_sig(dge_pooled, "pooled"),
+                     count_sig(dge_by_region, "per-region"))
+dge_summary
+
+wb <- createWorkbook()
+addWorksheet(wb, "summary")
+writeData(wb, "summary", dge_summary)
+saveWorkbook(wb, file.path(res_dir, "DGE_EAE-NonSymp_vs_CFA_hashing_summary.xlsx"),
+             overwrite = TRUE)
+```
+
+Pseudobulk PCA per region, computed **blind** to the design so it is an honest QC
+plot. `animal x region` is the aggregation unit, matching the DGE above, and PC1 is
+correlated against sequencing depth: if PC1 is a depth axis rather than a condition
+axis, the contrast is being driven by library size and not biology.
+
+```{r, fig.height=6, fig.width=9}
+for (mk in names(region_objects)) {
+  obj <- region_objects[[mk]]
+  DefaultAssay(obj) <- "RNA"
+  obj <- JoinLayers(obj)
+  cts <- GetAssayData(obj, assay = "RNA", layer = "counts")
+
+  # sparse aggregation: genes x animals (avoids densifying the full matrix)
+  g  <- factor(obj$animal)
+  mm <- Matrix::sparse.model.matrix(~ 0 + g); colnames(mm) <- levels(g)
+  pb <- as.matrix(cts %*% mm)
+
+  cd <- data.frame(
+    animal    = colnames(pb),
+    condition = factor(sub("_[0-9]+$", "", colnames(pb)),
+                       levels = c("CFA", "EAE-NonSymp", "EAE-Symp")),
+    row.names = colnames(pb)
+  )
+
+  dds <- DESeqDataSetFromMatrix(round(pb), cd, ~ condition)
+  dds <- dds[rowSums(counts(dds)) >= 10, ]
+  vsd <- vst(dds, blind = TRUE)          # blind = TRUE: ignore the design, honest QC
+
+  pdat <- plotPCA(vsd, intgroup = "condition", returnData = TRUE)
+  pv   <- round(100 * attr(pdat, "percentVar"))
+
+  print(
+    ggplot(pdat, aes(PC1, PC2, colour = condition, label = name)) +
+      geom_point(size = 4) + geom_text_repel(size = 3, show.legend = FALSE) +
+      labs(x = paste0("PC1: ", pv[1], "% variance"),
+           y = paste0("PC2: ", pv[2], "% variance"), colour = NULL,
+           title = paste0(mk, " pseudobulk, ", ncol(pb), " animals")) +
+      coord_fixed() + theme_bw()
+  )
+
+  cat(mk, "- cor(PC1, depth) =", round(cor(pdat$PC1, colSums(pb)[pdat$name]), 3),
+      " cor(PC1, nGene) =", round(cor(pdat$PC1, colSums(pb > 0)[pdat$name]), 3), "\n")
+  rm(obj, cts, pb); gc()
+}
+```
+
+##11. The symptomatic animal, described rather than tested
+
+`EAE-Symp_Brain_1` is a single animal (two technical replicates), so there is no
+valid test to run on it and none is run here. It is still informative, and two
+things can be reported honestly: how its cluster composition compares to the groups
+that do have replication, and how large its expression shift is for genes already
+identified in the replicated `EAE-NonSymp` vs `CFA` contrast. No p-values are
+produced in this section by design.
+
+```{r, fig.height=9, fig.width=12}
+prop_hash <- humanized_mouse_hashing@meta.data %>%
+  mutate(cluster = .data[[cluster_col_global]]) %>%
+  count(animal, condition, region, cluster, name = "n") %>%
+  group_by(animal, region) %>%
+  mutate(frac = n / sum(n)) %>%
+  ungroup()
+
+ggplot(prop_hash, aes(x = cluster, y = frac, colour = condition)) +
+  geom_point(position = position_dodge(width = 0.6), size = 2) +
+  facet_wrap(~ region, ncol = 1) +
+  scale_y_continuous(labels = percent) +
+  labs(x = "Cluster", y = "Fraction of nuclei in animal x region",
+       colour = "Condition") +
+  theme_classic(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Region-collapsed version of the same comparison, which is easier to read when a
+cluster is present in all four regions:
+
+```{r, fig.height=5, fig.width=11}
+prop_hash %>%
+  group_by(animal, condition, cluster) %>%
+  summarise(n = sum(n), .groups = "drop_last") %>%
+  group_by(animal) %>%
+  mutate(frac = n / sum(n)) %>%
+  ungroup() %>%
+  ggplot(aes(x = cluster, y = frac, colour = condition)) +
+  geom_point(position = position_dodge(width = 0.6), size = 2.5) +
+  scale_y_continuous(labels = percent) +
+  labs(x = "Cluster", y = "Fraction of nuclei in animal", colour = "Condition") +
+  theme_classic(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Effect size for the symptomatic animal on the replicated hits: pseudobulk CPM per
+`animal x region`, the same aggregation unit the DGE used, so the symptomatic value
+can be read directly against the spread of the three CFA and three non-symptomatic
+animals.
+
+```{r}
+pseudobulk_cpm <- function(seurat_obj, cluster_col, cluster_id,
+                           min_cells_per_pb = 10) {
+  idx <- seurat_obj@meta.data[[cluster_col]] == cluster_id
+  if (sum(idx, na.rm = TRUE) < min_cells_per_pb) return(NULL)
+  sub_obj <- seurat_obj[, which(idx)]
+  DefaultAssay(sub_obj) <- "RNA"
+  sub_obj <- JoinLayers(sub_obj)
+  cm   <- GetAssayData(sub_obj, assay = "RNA", layer = "counts")
+  meta <- sub_obj@meta.data
+  grp  <- paste(meta$animal, meta$region, sep = "__")
+  keep <- names(which(table(grp) >= min_cells_per_pb))
+  if (length(keep) == 0) return(NULL)
+  mat <- vapply(keep, function(g)
+    as.numeric(Matrix::rowSums(cm[, grp == g, drop = FALSE])),
+    numeric(nrow(cm)))
+  rownames(mat) <- rownames(cm)
+  cpm <- sweep(mat, 2, colSums(mat), "/") * 1e6
+  as.data.frame(cpm) %>%
+    mutate(gene = rownames(cpm)) %>%
+    pivot_longer(-gene, names_to = "group", values_to = "cpm") %>%
+    mutate(animal  = sub("__.*$", "", group),
+           region  = sub("^.*__", "", group),
+           cluster = as.character(cluster_id))
+}
+
+# Example: the top replicated hits of one cluster, with the symptomatic animal
+# shown alongside. Change `cl` to inspect other clusters.
+cl <- cluster_ids_global[1]
+if (!is.null(dge_pooled[[cl]])) {
+  top_genes <- head(dge_pooled[[cl]]$gene[which(dge_pooled[[cl]]$padj < 0.05)], 12)
+
+  if (length(top_genes) > 0) {
+    cpm_long <- pseudobulk_cpm(humanized_mouse_hashing, cluster_col_global, cl) %>%
+      filter(gene %in% top_genes) %>%
+      left_join(distinct(sample_sheet, animal, condition), by = "animal")
+
+    print(
+      ggplot(cpm_long, aes(x = condition, y = cpm, colour = condition)) +
+        geom_point(position = position_jitter(width = 0.15), size = 2) +
+        facet_wrap(~ gene, scales = "free_y") +
+        labs(x = NULL, y = "Pseudobulk CPM",
+             title = paste("Cluster", cl,
+                           "- replicated hits, all animals shown")) +
+        theme_classic(base_size = 12) +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1),
+              legend.position = "none")
+    )
+  }
+}
+```
+
+The same view split by region, which is where a symptomatic-specific effect would be
+expected to be regionally restricted rather than uniform:
+
+```{r, fig.height=7, fig.width=12}
+if (exists("cpm_long") && !is.null(cpm_long) && nrow(cpm_long) > 0) {
+  print(
+    ggplot(cpm_long, aes(x = region, y = cpm, colour = condition)) +
+      geom_point(position = position_jitterdodge(jitter.width = 0.15,
+                                                 dodge.width = 0.6), size = 2) +
+      facet_wrap(~ gene, scales = "free_y") +
+      labs(x = NULL, y = "Pseudobulk CPM", colour = "Condition",
+           title = paste("Cluster", cl, "- replicated hits by region")) +
+      theme_classic(base_size = 12) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  )
+}
+```
+
+Export the symptomatic animal's pseudobulk CPM alongside the replicated groups for
+every cluster, so the descriptive comparison is available outside this document.
+
+```{r}
+cpm_all <- do.call(rbind, lapply(cluster_ids_global, function(cl) {
+  out <- pseudobulk_cpm(humanized_mouse_hashing, cluster_col_global, cl)
+  if (is.null(out)) return(NULL)
+  keep_genes <- if (!is.null(dge_pooled[[cl]])) {
+    dge_pooled[[cl]]$gene[which(dge_pooled[[cl]]$padj < 0.05)]
+  } else character(0)
+  if (length(keep_genes) == 0) return(NULL)
+  out[out$gene %in% keep_genes, , drop = FALSE]
+}))
+
+if (!is.null(cpm_all) && nrow(cpm_all) > 0) {
+  cpm_all <- left_join(cpm_all, distinct(sample_sheet, animal, condition),
+                       by = "animal")
+  wb <- createWorkbook()
+  addWorksheet(wb, "pseudobulk_CPM")
+  writeData(wb, "pseudobulk_CPM", cpm_all)
+  saveWorkbook(wb, file.path(res_dir, "hashing_EAE-Symp_descriptive_CPM.xlsx"),
+               overwrite = TRUE)
+  cat("Saved descriptive CPM table for", length(unique(cpm_all$cluster)),
+      "clusters.\n")
+} else {
+  message("No significant genes to describe - nothing saved.")
+}
+```
+
+##12. Session info
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,5 @@
+id,name,read,pattern,sequence,feature_type
+AB1_Cerebellum,Cerebellum,R2,5PNNNNNNNNNN(BC),TTCCTGCCATTACTA,Antibody Capture
+AB2_OlfactoryBulb,Olfactory_Bulb,R2,5PNNNNNNNNNN(BC),CCGTACCTCATTGTT,Antibody Capture
+AB3_Striatum,Striatum,R2,5PNNNNNNNNNN(BC),GGTAGATGTCCTCAG,Antibody Capture
+AB4_Cortex,Cortex,R2,5PNNNNNNNNNN(BC),TGGTGTCATTCTTGA,Antibody Capture

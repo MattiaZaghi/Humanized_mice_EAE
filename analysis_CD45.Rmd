@@ -1,0 +1,1002 @@
+---
+title: "Humanized mice EAE analysis - CD45+ sorted cells (Brain / Meninges / Spleen)"
+author: "Mattia Zaghi"
+date: "2026-09-02"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+## What is this vignette for?
+
+This vignette processes the **CD45+ sorted** samples defined in
+`Preprocessing/config/config_CD45+_sorted.yaml`. The design differs from the
+other datasets in this repository in two ways that shape every downstream
+choice made below:
+
+* Three **tissues** were sorted from each animal: `Brain`, `Meninges`, `Spleen`.
+  Cells from the same animal therefore appear in three libraries, so libraries
+  are *not* independent replicates of the condition effect.
+* Three **conditions** were collected: `CFA` (n = 3), `EAE-NonSymp` (n = 3) and
+  `EAE-Symp` (**n = 1**).
+
+The single symptomatic animal is the critical constraint. With one biological
+replicate there is no within-group variance to estimate, so no statistical
+test of `EAE-Symp` vs anything is valid - a nominal p-value from such a
+comparison reflects only within-animal cell-to-cell noise and will be
+anticonservative by a wide margin. This vignette therefore reserves formal
+testing for `EAE-NonSymp` vs `CFA` (3 vs 3, per tissue) and treats
+`EAE-Symp` descriptively: it is embedded, clustered, annotated and plotted
+alongside the rest, and reported as effect sizes without p-values.
+
+Everything else mirrors `analysis.Rmd`: CellBender-corrected input, per-sample
+QC, per-sample DoubletFinder, merge, SCTransform, clustering, and pseudobulk
+DESeq2 within each cluster.
+
+##1. Load packages and configure directories
+
+```{r setup, include=FALSE}
+library(Seurat)
+library(future)
+library(tidyverse)
+library(dplyr)
+library(ggthemes)
+library(scales)
+library(cowplot)
+library(RColorBrewer)
+library(openxlsx)
+library(purrr)
+library(forcats)
+library(hdf5r)
+library(patchwork)
+library(pals)
+library(knitr)
+library(DoubletFinder)
+library(ggpubr)
+library(pheatmap)
+library(DESeq2)
+library(ggrepel)
+library(yaml)
+opts_knit$set(root.dir = "/ws/gcb/MZ/Humanized_mice_OD/CD45/") # change accordingly
+```
+
+##2. Sample sheet
+
+The sample names are read from the preprocessing config rather than retyped, so
+this vignette cannot drift out of sync with what Cell Ranger actually
+processed. Condition and tissue are parsed from the sample name
+(`<condition>_<tissue>_<replicate>`), and `animal` identifies the mouse that a
+library came from - the unit of replication for every condition contrast.
+
+```{r}
+base_dir <- "/ws/gcb/MZ/Humanized_mice_OD/CD45/"
+
+# knitr's root.dir points at the data directory, not the repository, so the
+# config is addressed absolutely. Adjust repo_dir if the checkout moves.
+repo_dir    <- "/home/mattia/Humanized_mice_EAE"
+config_path <- file.path(repo_dir, "Preprocessing/config/config_CD45+_sorted.yaml")
+stopifnot(file.exists(config_path))
+
+cfg          <- yaml::read_yaml(config_path)
+cd45_samples <- names(cfg$samples)
+
+sample_sheet <- data.frame(
+  sample = cd45_samples,
+  stringsAsFactors = FALSE
+)
+sample_sheet$condition <- sub("_[^_]+_[^_]+$", "", sample_sheet$sample)
+sample_sheet$tissue    <- sub("^.*_([^_]+)_[^_]+$", "\\1", sample_sheet$sample)
+sample_sheet$replicate <- sub("^.*_", "", sample_sheet$sample)
+# One animal contributed Brain + Meninges + Spleen, so the animal id is the
+# condition and the replicate number, without the tissue.
+sample_sheet$animal <- paste(sample_sheet$condition, sample_sheet$replicate,
+                             sep = "_")
+
+sample_sheet$condition <- factor(sample_sheet$condition,
+                                 levels = c("CFA", "EAE-NonSymp", "EAE-Symp"))
+sample_sheet$tissue    <- factor(sample_sheet$tissue,
+                                 levels = c("Brain", "Meninges", "Spleen"))
+
+# Sanity check: replication available for each condition x tissue cell
+with(sample_sheet, table(condition, tissue))
+sample_sheet
+```
+
+##3. Create the Seurat object
+
+Loading is as in `analysis.Rmd`: the CellBender-corrected h5 per sample,
+feature names normalised, barcodes prefixed with the sample name, and the
+combined mouse + human mitochondrial fraction computed against the joint
+GRCh38-and-mm10 reference.
+
+```{r}
+# Expected multiplet rate as a function of recovered cells, interpolated from
+# the 10x Chromium 3' table (~0.8% per 1,000 cells, near-linear in this range).
+# These libraries recovered ~5,000 cells each, so the expected rate is ~3.9% -
+# not the 0.075 inherited from analysis.Rmd, which corresponds to ~10,000 cells
+# and would discard roughly 270 singlets per library as doublets.
+doublet_rate_10x <- function(n_cells) {
+  ref_cells <- c(  500,  1000,  2000,  3000,  4000,  5000,
+                  6000,  7000,  8000,  9000, 10000)
+  ref_rate  <- c(0.004, 0.008, 0.016, 0.023, 0.031, 0.039,
+                 0.046, 0.054, 0.061, 0.069, 0.076)
+  as.numeric(approx(ref_cells, ref_rate, xout = n_cells, rule = 2)$y)
+}
+
+mt_cutoff <- 5
+
+seurat_list <- list()
+
+for (i in seq_len(nrow(sample_sheet))) {
+  sample  <- sample_sheet$sample[i]
+  h5_path <- file.path(base_dir, sample, "RNA_AAAAGGGG/epochs/",
+                       "cellbender_output_seurat.h5")
+  if (!file.exists(h5_path)) {
+    warning("Missing file: ", h5_path)
+    next
+  }
+  message("Loading ", sample)
+
+  data <- Read10X_h5(filename = h5_path, use.names = TRUE)
+  if (is.list(data)) data <- data[["Gene Expression"]]
+
+  # Normalize feature names: collapse underscores and multiple dashes
+  fn <- rownames(data)
+  fn <- gsub("_+", "-", fn)
+  fn <- gsub("-{2,}", "-", fn)
+  rownames(data) <- fn
+
+  colnames(data) <- paste0(sample, "_", colnames(data))
+
+  seurat_obj <- CreateSeuratObject(
+    counts       = data,
+    project      = sample,
+    min.cells    = 3,
+    min.features = 200
+  )
+
+  seurat_obj[["percent.mt.mm10"]] <- PercentageFeatureSet(seurat_obj, pattern = "mt-")
+  seurat_obj[["percent.mt.hg38"]] <- PercentageFeatureSet(seurat_obj, pattern = "MT-")
+  seurat_obj[["percent.mt"]] <-
+    seurat_obj[["percent.mt.mm10"]] + seurat_obj[["percent.mt.hg38"]]
+
+  seurat_obj <- subset(seurat_obj, subset = percent.mt < mt_cutoff)
+
+  # Carry the design metadata on every cell
+  seurat_obj$sample    <- sample
+  seurat_obj$condition <- as.character(sample_sheet$condition[i])
+  seurat_obj$tissue    <- as.character(sample_sheet$tissue[i])
+  seurat_obj$animal    <- sample_sheet$animal[i]
+
+  seurat_list[[sample]] <- seurat_obj
+}
+```
+
+##4. Doublet removal
+
+Per-sample DoubletFinder, run on each library independently so that the
+artificial-doublet population is built from the same cell composition as the
+library it is scoring.
+
+Two departures from `analysis.Rmd`, both motivated in the evaluation section at
+the end of this vignette:
+
+1. **`pK` is estimated per sample** with `paramSweep`/`find.pK` instead of being
+   fixed at 0.09. `pK` sets the neighbourhood size used to compute pANN, and its
+   optimum depends on the number of cells and the number of distinct
+   populations. A CD45+ Meninges library and a CD45+ Spleen library differ in
+   both, so one hard-coded value cannot suit them all.
+2. **The homotypic-proportion adjustment is applied downward, not upward.**
+   `nExp` should be the expected doublet count *reduced* by the fraction that
+   are homotypic and therefore undetectable, i.e. `nExp * (1 - homotypic)`.
+
+```{r}
+for (sample in names(seurat_list)) {
+  message("Doublet detection: ", sample)
+  seurat_obj <- seurat_list[[sample]]
+
+  # Light preprocessing for doublet detection (per sample, SCT)
+  seurat_obj <- SCTransform(seurat_obj, verbose = FALSE)
+  seurat_obj <- RunPCA(seurat_obj, verbose = FALSE)
+  seurat_obj <- FindNeighbors(seurat_obj, dims = 1:10, verbose = FALSE)
+  seurat_obj <- FindClusters(seurat_obj, resolution = 0.1, verbose = FALSE)
+  seurat_obj <- RunUMAP(seurat_obj, dims = 1:10, verbose = FALSE)
+
+  umap_before <- DimPlot(seurat_obj, reduction = "umap",
+                         group.by = "seurat_clusters") +
+    ggtitle(paste(sample, "before doublet removal"))
+
+  # ---- pK estimation (per sample) ----
+  sweep_res   <- paramSweep(seurat_obj, PCs = 1:10, sct = TRUE)
+  sweep_stats <- summarizeSweep(sweep_res, GT = FALSE)
+  bcmvn       <- find.pK(sweep_stats)
+  pK <- as.numeric(as.character(
+    bcmvn$pK[which.max(bcmvn$BCmetric)]
+  ))
+  if (is.na(pK) || length(pK) == 0) pK <- 0.09  # fall back to the fixed value
+  message("  pK = ", pK)
+  pN <- 0.25
+
+  # ---- expected number of doublets, corrected for homotypic pairs ----
+  # The rate is taken from this library's own cell count, so a library that
+  # recovered fewer cells is not over-filtered.
+  rate <- doublet_rate_10x(ncol(seurat_obj))
+
+  # modelHomotypic needs a clustering fine enough to separate cell types; the
+  # res = 0.1 used for the QC UMAP is too coarse and inflates the homotypic
+  # estimate. A finer clustering is computed here for this purpose only.
+  seurat_obj <- FindClusters(seurat_obj, resolution = 0.8,
+                             cluster.name = "clusters_for_homotypic",
+                             verbose = FALSE)
+  homotypic <- modelHomotypic(seurat_obj$clusters_for_homotypic)
+
+  nExp_poi <- round(rate * ncol(seurat_obj))
+  nExp_adj <- round(nExp_poi * (1 - homotypic))
+  message("  cells = ", ncol(seurat_obj),
+          ", rate = ", signif(rate, 3),
+          ", homotypic = ", signif(homotypic, 3),
+          ", nExp = ", nExp_poi, " -> ", nExp_adj)
+
+  seurat_obj <- doubletFinder(seurat_obj, PCs = 1:10, pN = pN, pK = pK,
+                              nExp = nExp_poi, reuse.pANN = NULL, sct = TRUE)
+
+  df_col <- grep("^pANN_", colnames(seurat_obj@meta.data), value = TRUE)[1]
+  if (is.na(df_col)) stop("DoubletFinder pANN metadata not found")
+
+  seurat_obj <- doubletFinder(seurat_obj, PCs = 1:10, pN = pN, pK = pK,
+                              nExp = nExp_adj, reuse.pANN = df_col, sct = TRUE)
+
+  # The adjusted classification is the one keyed to nExp_adj; select it by name
+  # rather than by position so the choice does not depend on column ordering.
+  df_class_col <- grep(paste0("^DF.classifications_.*_", nExp_adj, "$"),
+                       colnames(seurat_obj@meta.data), value = TRUE)
+  if (length(df_class_col) == 0) {
+    df_class_col <- tail(grep("^DF.classifications_",
+                              colnames(seurat_obj@meta.data), value = TRUE), 1)
+  }
+  if (length(df_class_col) == 0) stop("DoubletFinder classification not found")
+  message("  using ", df_class_col)
+
+  seurat_obj$doublet_class <- seurat_obj@meta.data[[df_class_col]]
+  seurat_obj$doublet_pANN  <- seurat_obj@meta.data[[df_col]]
+
+  # Diagnostic: where do the called doublets sit? A cluster that is almost
+  # entirely doublet-called is a real doublet cluster; doublets scattered
+  # evenly across all clusters suggest the rate is set too high.
+  print(DimPlot(seurat_obj, reduction = "umap", group.by = "doublet_class") +
+          ggtitle(paste(sample, "doublet calls")))
+  print(table(cluster = seurat_obj$seurat_clusters,
+              call    = seurat_obj$doublet_class))
+  print(VlnPlot(seurat_obj, features = c("nFeature_RNA", "nCount_RNA"),
+                group.by = "doublet_class", pt.size = 0) +
+          patchwork::plot_annotation(title = paste(sample, "complexity by call")))
+
+  sel_singlets <- seurat_obj$doublet_class == "Singlet"
+  if (sum(sel_singlets, na.rm = TRUE) == 0) {
+    stop("No cells annotated as Singlet in ", sample)
+  }
+  seurat_obj <- subset(seurat_obj,
+                       cells = colnames(seurat_obj)[which(sel_singlets)])
+
+  # Recompute after doublet removal
+  DefaultAssay(seurat_obj) <- "RNA"
+  seurat_obj[["SCT"]] <- NULL
+  seurat_obj <- SCTransform(seurat_obj, verbose = FALSE)
+  seurat_obj <- RunPCA(seurat_obj, verbose = FALSE)
+  seurat_obj <- FindNeighbors(seurat_obj, dims = 1:10, verbose = FALSE)
+  seurat_obj <- FindClusters(seurat_obj, resolution = 0.1, verbose = FALSE)
+  seurat_obj <- RunUMAP(seurat_obj, dims = 1:10, verbose = FALSE)
+
+  umap_after <- DimPlot(seurat_obj, reduction = "umap",
+                        group.by = "seurat_clusters") +
+    ggtitle(paste(sample, "after doublet removal"))
+
+  print(umap_before + umap_after)
+
+  seurat_list[[sample]] <- seurat_obj
+}
+```
+
+Record how many cells each library lost, so an outlying sample is visible
+before it influences the merged object.
+
+```{r}
+doublet_summary <- do.call(rbind, lapply(names(seurat_list), function(s) {
+  data.frame(sample = s, cells_retained = ncol(seurat_list[[s]]))
+}))
+doublet_summary <- left_join(doublet_summary, sample_sheet, by = "sample")
+doublet_summary
+
+ggplot(doublet_summary, aes(x = sample, y = cells_retained, fill = tissue)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = NULL, y = "Cells retained after doublet removal") +
+  theme_classic(base_size = 12)
+```
+
+##5. Merge and cluster
+
+```{r}
+humanized_mouse_cd45 <- Reduce(function(x, y) merge(x, y), seurat_list)
+rm(seurat_list); gc()
+
+# Remove per-sample doublet-detection metadata, which is meaningless once the
+# libraries are merged (the columns are keyed to each sample's own nExp)
+md <- humanized_mouse_cd45@meta.data
+drop_cols <- grep("^(pANN_|DF.classifications_|nCount_SCT|nFeature_SCT|SCT_snn_res|seurat_clusters|clusters_for_homotypic)",
+                  colnames(md), value = TRUE)
+for (cc in drop_cols) humanized_mouse_cd45@meta.data[[cc]] <- NULL
+
+humanized_mouse_cd45 <- subset(humanized_mouse_cd45,
+                               subset = percent.mt < mt_cutoff)
+humanized_mouse_cd45
+```
+
+Normalisation follows `analysis.Rmd`: a log-normalised RNA branch (kept for
+marker plots and for the pseudobulk step, which reads raw counts) and an SCT
+branch used for dimensionality reduction and clustering.
+
+```{r}
+options(future.globals.maxSize = 100e+09)
+
+DefaultAssay(humanized_mouse_cd45)<-"RNA"
+
+humanized_mouse_cd45[["SCT"]] <- NULL
+
+# Log-normalized analysis on RNA
+humanized_mouse_cd45 <- NormalizeData(humanized_mouse_cd45, assay = "RNA")
+humanized_mouse_cd45 <- FindVariableFeatures(humanized_mouse_cd45, assay = "RNA")
+humanized_mouse_cd45 <- ScaleData(humanized_mouse_cd45, assay = "RNA")
+humanized_mouse_cd45 <- RunPCA(humanized_mouse_cd45, assay = "RNA",
+                               reduction.name = "pca_lognorm")
+
+# SCT analysis on SCT assay
+humanized_mouse_cd45 <- SCTransform(humanized_mouse_cd45, verbose = TRUE)
+humanized_mouse_cd45 <- FindVariableFeatures(humanized_mouse_cd45, assay = "SCT")
+humanized_mouse_cd45 <- RunPCA(humanized_mouse_cd45, assay = "SCT",
+                               reduction.name = "pca_SCT")
+```
+
+Read the elbow before fixing `n_dims`. The value below is the one used for the
+unsorted brain; a CD45+ sorted population is less heterogeneous, so confirm it
+rather than inheriting it.
+
+```{r}
+ElbowPlot(humanized_mouse_cd45, reduction = "pca_SCT", ndims = 50)
+```
+
+```{r}
+n_dims <- 20  # <- set from the elbow plot above
+
+humanized_mouse_cd45 <- FindNeighbors(humanized_mouse_cd45, dims = 1:n_dims,
+                                      reduction = "pca_SCT")
+humanized_mouse_cd45 <- FindClusters(humanized_mouse_cd45, resolution = 0.5,
+                                     cluster.name = "unintegrated_clusters")
+humanized_mouse_cd45 <- RunUMAP(humanized_mouse_cd45, dims = 1:n_dims,
+                                reduction = "pca_SCT",
+                                reduction.name = "umap.unintegrated")
+```
+
+```{r, fig.height=6, fig.width=18}
+my_colors <- as.vector(pals::polychrome(36))
+
+p1 <- DimPlot(humanized_mouse_cd45, reduction = "umap.unintegrated",
+              group.by = "unintegrated_clusters", cols = my_colors,
+              label = TRUE) + labs(x = "UMAP 1", y = "UMAP 2")
+p2 <- DimPlot(humanized_mouse_cd45, reduction = "umap.unintegrated",
+              group.by = "tissue") + labs(x = "UMAP 1", y = "UMAP 2")
+p3 <- DimPlot(humanized_mouse_cd45, reduction = "umap.unintegrated",
+              group.by = "condition") + labs(x = "UMAP 1", y = "UMAP 2")
+p1 + p2 + p3
+
+
+```
+
+Cluster composition by tissue and by animal. The second panel is the one to
+read sceptically: a cluster carried by a single animal is a batch effect
+candidate, not a biological population.
+
+```{r, fig.height=8, fig.width=14}
+comp_tissue <- as.data.frame(table(cluster = humanized_mouse_cd45$unintegrated_clusters,
+                                   tissue  = humanized_mouse_cd45$tissue))
+comp_animal <- as.data.frame(table(cluster = humanized_mouse_cd45$unintegrated_clusters,
+                                   animal  = humanized_mouse_cd45$animal))
+
+q1 <- ggplot(comp_tissue, aes(x = cluster, y = Freq, fill = tissue)) +
+  geom_col(position = "fill") + scale_y_continuous(labels = percent) +
+  labs(x = "Cluster", y = "Fraction of cells", fill = "Tissue") +
+  theme_classic(base_size = 14)
+q2 <- ggplot(comp_animal, aes(x = cluster, y = Freq, fill = animal)) +
+  geom_col(position = "fill") + scale_y_continuous(labels = percent) +
+  labs(x = "Cluster", y = "Fraction of cells", fill = "Animal") +
+  theme_classic(base_size = 14)
+q1 / q2
+```
+
+Cluster markers.
+
+```{r}
+DefaultAssay(humanized_mouse_cd45) <- "SCT"
+humanized_mouse_cd45 <- PrepSCTFindMarkers(humanized_mouse_cd45)
+cd45_markers <- FindAllMarkers(humanized_mouse_cd45, only.pos = TRUE)
+
+write.xlsx(cd45_markers,
+           "/ws/gcb/MZ/Humanized_mice_OD/Results/CD45_cluster_markers.xlsx",
+           overwrite = TRUE)
+cd45_markers %>% group_by(cluster) %>% slice_max(avg_log2FC, n = 10)
+```
+
+```{r}
+#remove cluster 13 which is from ambient RNA contamination
+
+humanized_mouse <- subset(humanized_mouse, idents = c("0", "1","2","3","4","5","6","7","8","9","10","11","12",
+                                               "14","15","16"))
+#rename fine and broad celltype annotation
+
+fine_global <- c(
+  "0"  = "CD4 T (memory/Th17)",
+  "1"  = "Pre-B",
+  "2"  = "B naive",
+  "3"  = "CD4 T naive/CM",
+  "4"  = "CD8 T (GZMK+ EM)",
+  "5"  = "Monocytes classical",
+  "6"  = "Monocytes non-class.",
+  "7"  = "B cells (IGLC2-hi)",
+  "8"  = "cDC2 / mo-DC",
+  "9"  = "B cells (IGHM/IGLC3)",
+  "10" = "Proliferating",
+  "11" = "Neutrophils mature",
+  "12" = "Macrophages",
+  "13" = "Pre-B proliferating",
+  "14" = "CD8 T activated",
+  "15" = "NK",
+  "16" = "B transitional",
+  "17" = "pDC",
+  "18" = "Pro-B / early lymph.",
+  "19" = "Neutrophils immature",
+  "20" = "B cells (IGLC1-hi)",
+  "21" = "MAIT / innate-like T",
+  "22" = "Plasma cells",
+  "23" = "cDC1",
+  "24" = "Mast cells",
+  "25" = "Plasma cells (IGLV+)",
+  "26" = "B germinal-centre",
+  "27" = "Plasmablasts",
+  "28" = "Plasma cells (BCMA+)"
+)
+humanized_mouse_cd45<-RenameIdents(humanized_mouse_cd45,fine_global)
+humanized_mouse_cd45@meta.data$fine_clusters<-humanized_mouse_cd45@active.ident
+
+lineage_global <- c(
+  "CD4 T (memory/Th17)"  = "CD4 T",
+  "Pre-B"                = "B progenitor",
+  "B naive"              = "B",
+  "CD4 T naive/CM"       = "CD4 T",
+  "CD8 T (GZMK+ EM)"     = "CD8 T",
+  "Monocytes classical"  = "Monocyte",
+  "Monocytes non-class." = "Monocyte",
+  "B cells (IGLC2-hi)"   = "B",
+  "cDC2 / mo-DC"         = "DC",
+  "B cells (IGHM/IGLC3)" = "B",
+  "Proliferating"        = "Proliferating",
+  "Neutrophils mature"   = "Neutrophil",
+  "Macrophages"          = "Macrophage",
+  "Pre-B proliferating"  = "B progenitor",
+  "CD8 T activated"      = "CD8 T",
+  "NK"                   = "NK",
+  "B transitional"       = "B",
+  "pDC"                  = "DC",
+  "Pro-B / early lymph." = "B progenitor",
+  "Neutrophils immature" = "Neutrophil",
+  "B cells (IGLC1-hi)"   = "B",
+  "MAIT / innate-like T" = "Innate-like T",
+  "Plasma cells"         = "Plasma",
+  "cDC1"                 = "DC",
+  "Mast cells"           = "Mast",
+  "Plasma cells (IGLV+)" = "Plasma",
+  "B germinal-centre"    = "B",
+  "Plasmablasts"         = "Plasma",
+  "Plasma cells (BCMA+)" = "Plasma"
+)
+humanized_mouse_cd45<-RenameIdents(humanized_mouse_cd45,lineage_global)
+humanized_mouse_cd45@meta.data$broad_clusters<-humanized_mouse_cd45@active.ident
+
+saveRDS(humanized_mouse_cd45,
+        "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/objects/humanized_mouse_cd45_SCT.rds")
+```
+
+Export umap coordinates and Clusters
+
+```{r}
+suppressPackageStartupMessages({ library(Seurat); library(openxlsx) })
+
+obj_dir  <- "/ws/gcb/MZ/Humanized_mice_OD/Results"
+out_xlsx <- "/ws/gcb/MZ/Humanized_mice_OD/Results/CD45_metadata.xlsx"
+
+wb <- createWorkbook()
+  mk<-"CD45"
+  md <- humanized_mouse_cd45@meta.data
+  md$barcode<-colnames(humanized_mouse_cd45)
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+
+
+obj_dir  <- "/ws/gcb/MZ/Humanized_mice_OD/Results"
+out_xlsx <- "/ws/gcb/MZ/Humanized_mice_OD/Results/CD45_UMAP_coordinates_harmony.xlsx"
+
+wb <- createWorkbook()
+  md <- humanized_mouse_cd45@reductions$umap.unintegrated@cell.embeddings
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+
+  saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+  
+```
+
+save full count matrix for future
+
+```{r}
+library("zellkonverter")
+library(SingleCellExperiment)
+sce <- as.SingleCellExperiment(humanized_mouse_cd45, assay = "RNA")
+writeH5AD(sce, "/ws/gcb/MZ/Humanized_mice_OD/Results/humanized_mouse_cd45.h5ad")
+
+library(Matrix); library(data.table)
+
+obj <- humanized_mouse_cd45
+
+DefaultAssay(obj) <- "RNA"
+obj <- JoinLayers(obj)
+mat <- GetAssayData(obj, assay = "RNA", layer = "data")   # or layer = "counts" for raw
+
+outfile   <- "/ws/gcb/MZ/Humanized_mice_OD/Results/Count_Matrix.csv.gz"
+dir.create(dirname(outfile), recursive = TRUE, showWarnings = FALSE)
+
+chunk <- 2000
+idx   <- split(seq_len(ncol(mat)), ceiling(seq_len(ncol(mat)) / chunk))
+
+for (i in seq_along(idx)) {
+  blk <- as.matrix(t(mat[, idx[[i]], drop = FALSE]))    # cells x genes
+  dt  <- data.table(cell = rownames(blk), blk)
+  fwrite(dt, outfile, append = i > 1, col.names = i == 1, compress = "gzip")
+  message("chunk ", i, "/", length(idx))
+}
+```
+
+
+##6. Reclustering based on brain regions 
+
+```{r}
+# 1) cluster set
+tissue <- unique(humanized_mouse_cd45$tissue)
+
+# storage
+clusters_objects <- list()
+
+for (bc in tissue) {
+  bc_clean <- make.names(bc)
+  obj_name <- paste0(bc_clean)
+  message("Processing tissue: ", bc, " --> ", obj_name)
+
+  # subset
+  TS <- subset(humanized_mouse_cd45, subset = tissue == bc)
+
+  # prep
+  DefaultAssay(TS) <- "RNA"
+  TS[["SCT"]] <- NULL
+  TS <- SCTransform(TS, vst.flavor = "v2", verbose = FALSE)
+  TS <- RunPCA(TS, verbose = FALSE, reduction.name = paste0("pca",obj_name,"_SCT"))
+  TS <- FindNeighbors(TS, reduction = paste0("pca",obj_name,"_SCT"), dims = 1:20,
+                      graph.name = c(paste0(obj_name,"_nn"), paste0(obj_name,"_snn")))
+  TS <- FindClusters(TS, resolution = 0.5,
+                     graph.name = paste0(obj_name,"_snn"), cluster.name = paste0(obj_name,"_clusters"))
+  TS <- RunUMAP(TS, reduction = paste0("pca",obj_name,"_SCT"), dims = 1:20,
+                reduction.name = paste0("umap_",obj_name))
+  # store into list by key
+  clusters_objects[[obj_name]] <- TS
+  # save object
+  saveRDS(TS, file = file.path("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/objects/",
+                               paste0(obj_name, "_CD45_SCT.rds")))
+  # markers
+  DefaultAssay(TS) <- "SCT"
+  TS <- PrepSCTFindMarkers(TS, assay = "SCT", verbose = FALSE)
+  TS_markers <- FindAllMarkers(TS, only.pos = TRUE)
+
+  # Create a new workbook
+  wb <- createWorkbook()
+
+  # Loop through each cluster and add data to a new sheet
+  for (cluster_value in unique(TS_markers$cluster)) {
+    cluster_data <- subset(TS_markers, cluster == cluster_value)
+    sheet_name <- paste0("Cluster_", cluster_value)
+    addWorksheet(wb, sheet_name)
+    writeData(wb, sheet_name, cluster_data)
+}
+
+# Save the workbook to a file
+saveWorkbook(wb, paste0("/date/gcb/gcb_MZ/Humanized_mice_OD/Results/cluster_markers/",bc,"_CD45_markers.xlsx"), overwrite = TRUE)
+}
+```
+
+Save Umap and Metadata coordinates
+
+
+```{r}
+suppressPackageStartupMessages({ library(Seurat); library(openxlsx) })
+
+obj_dir  <- "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/UMAP_Metadata_count_matrices/"
+out_xlsx <- "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/UMAP_Metadata_count_matrices/Reclustering_CD45_metadata.xlsx"
+
+
+cat("marks:", paste(names(clusters_objects), collapse = ", "), "\n")
+
+wb <- createWorkbook()
+for (mk in names(clusters_objects)) {
+  md <- clusters_objects[[mk]]@meta.data
+  md$barcode<-colnames(clusters_objects[[mk]])
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+}
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+cat("Wrote:", out_xlsx, "\n")
+
+obj_dir  <- "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/UMAP_Metadata_count_matrices"
+out_xlsx <- "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/UMAP_Metadata_count_matrices/Reclustering_CD45_UMAP.xlsx"
+
+cat("marks:", paste(names(clusters_objects), collapse = ", "), "\n")
+
+wb <- createWorkbook()
+for (mk in names(clusters_objects)) {
+  md <- clusters_objects[[mk]]@reductions[[paste0("umap_",mk)]]@cell.embeddings
+  df <- data.frame(cell = rownames(md), md, row.names = NULL,
+                   check.names = FALSE, stringsAsFactors = FALSE)
+  addWorksheet(wb, mk)
+  writeData(wb, mk, df)
+  cat(sprintf("  %-9s : %d cells x %d metadata columns\n", mk, nrow(df), ncol(df) - 1))
+}
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+cat("Wrote:", out_xlsx, "\n")
+
+
+```
+
+
+
+##6. Differential gene expression: EAE-NonSymp vs CFA
+
+Pseudobulk DESeq2 within each cluster, with the animal as the unit of
+replication. Two features of this design need handling that the unsorted brain
+dataset did not:
+
+* **Each animal contributed three tissues.** Aggregating per animal x tissue
+  and fitting `~ tissue + condition` blocks the tissue effect while keeping the
+  condition term estimated across animals. Tissue is dropped automatically when
+  a cluster is confined to one tissue, which would otherwise leave the model
+  rank-deficient.
+* **`EAE-Symp` has n = 1** and is excluded from testing. It is summarised
+  separately below without p-values.
+
+CFA is the reference level, so a positive log2FC means higher in EAE.
+
+```{r}
+
+run_pseudobulk_dge_cd45 <- function(seurat_obj,
+                                    cluster_col,
+                                    cluster_id,
+                                    test_conditions  = c("CFA", "EAE"),
+                                    animal_col       = "sample",
+                                    tissue_col       = "tissue",
+                                    condition_col    = "disease",
+                                    min_cells        = 10,
+                                    min_cells_per_pb = 10,
+                                    min_counts       = 10) {
+
+  idx <- seurat_obj@meta.data[[cluster_col]] == cluster_id &
+    seurat_obj@meta.data[[condition_col]] %in% test_conditions
+  if (sum(idx) < min_cells) {
+    message("Skipping cluster ", cluster_id, ": only ", sum(idx), " testable cells")
+    return(NULL)
+  }
+  
+
+  sub_obj <- seurat_obj[, idx]
+  DefaultAssay(sub_obj) <- "RNA"
+  sub_obj <- JoinLayers(sub_obj)
+  counts_mat <- GetAssayData(sub_obj, assay = "RNA", layer = "counts")
+  meta <- sub_obj@meta.data
+
+  # One pseudobulk profile per animal x tissue
+  pb_group <- paste(meta[[animal_col]], meta[[tissue_col]], sep = "__")
+
+  keep_groups <- names(which(table(pb_group) >= min_cells_per_pb))
+  if (length(keep_groups) < 4) {
+    message("Skipping cluster ", cluster_id,
+            ": fewer than 4 usable pseudobulk groups")
+    return(NULL)
+  }
+
+  pb_mat <- vapply(keep_groups, function(g) {
+    as.numeric(Matrix::rowSums(counts_mat[, pb_group == g, drop = FALSE]))
+  }, numeric(nrow(counts_mat)))
+  rownames(pb_mat) <- rownames(counts_mat)
+
+  col_meta <- data.frame(
+    group     = keep_groups,
+    animal    = sub("__.*$", "", keep_groups),
+    tissue    = factor(sub("^.*__", "", keep_groups)),
+    row.names = keep_groups
+  )
+  col_meta$condition <- factor(
+    vapply(col_meta$animal, function(a)
+      unique(as.character(meta[[condition_col]][meta[[animal_col]] == a]))[1],
+      character(1)),
+    levels = test_conditions
+  )
+
+  # Require at least two animals per condition, or the dispersion estimate is
+  # not identifiable and the test is not interpretable.
+  n_animals <- tapply(col_meta$animal, col_meta$condition,
+                      function(x) length(unique(x)))
+  if (any(is.na(n_animals)) || any(n_animals < 2)) {
+    message("Skipping cluster ", cluster_id,
+            ": fewer than 2 animals in one condition")
+    return(NULL)
+  }
+
+  col_meta$tissue <- droplevels(col_meta$tissue)
+  use_tissue <- nlevels(col_meta$tissue) > 1 &&
+    !any(rowSums(table(col_meta$tissue, col_meta$condition) > 0) < 2)
+  design <- if (use_tissue) ~ tissue + condition else ~ condition
+  message("Cluster ", cluster_id, ": ", nrow(col_meta),
+          " pseudobulk groups, design ", deparse(design))
+
+  pb_mat <- pb_mat[rowSums(pb_mat) >= min_counts, , drop = FALSE]
+  if (nrow(pb_mat) < 10) {
+    message("Skipping cluster ", cluster_id, ": too few expressed genes")
+    return(NULL)
+  }
+
+  tryCatch({
+    dds <- DESeqDataSetFromMatrix(countData = round(pb_mat),
+                                  colData   = col_meta,
+                                  design    = design)
+    dds <- DESeq(dds, quiet = TRUE)
+    res <- results(dds, contrast = c("condition", test_conditions[2],
+                                     test_conditions[1]))
+    res_df <- as.data.frame(res)
+    res_df$gene    <- rownames(res_df)
+    res_df$cluster <- as.character(cluster_id)
+    res_df$design  <- deparse(design)
+    res_df$n_pb    <- nrow(col_meta)
+    res_df[order(res_df$padj, na.last = TRUE), ]
+  }, error = function(e) {
+    message("DESeq2 error - cluster ", cluster_id, ": ", conditionMessage(e))
+    NULL
+  })
+}
+
+```
+
+DGE within each cluster, pooling tissues and blocking on tissue.
+
+```{r}
+tissue <- names(clusters_objects)
+
+for (bc in tissue) {
+  cluster_ids <- levels(clusters_objects[[bc]]@meta.data[[paste0(bc, "_clusters")]])
+
+  dge_cd45_list <- lapply(cluster_ids, function(cl) {
+    message("[", bc, "] Running DGE for cluster: ", cl)
+    tryCatch(
+      run_pseudobulk_dge_cd45(
+        seurat_obj  = clusters_objects[[bc]],
+        cluster_col = paste0(bc, "_clusters"),
+        cluster_id  = cl
+      ),
+      error = function(e) { message("  skipped: ", conditionMessage(e)); NULL }
+    )
+  })
+  names(dge_cd45_list) <- cluster_ids
+
+  wb_cd45 <- createWorkbook()                     # inside the loop
+  for (cl in names(dge_cd45_list)) {
+    res <- dge_cd45_list[[cl]]
+    if (is.null(res) || nrow(res) == 0) next
+    res <- data.frame(gene = rownames(res), res, row.names = NULL)
+    sheet_name <- substr(gsub("[\\[\\]:*?/\\\\]", "_", paste0("Cluster_", cl)), 1, 31)
+    addWorksheet(wb_cd45, sheet_name)
+    writeData(wb_cd45, sheet_name, res)
+  }
+
+  if (length(names(wb_cd45)) == 0) { message("No results for ", bc, " - nothing saved."); next }
+
+  saveWorkbook(wb_cd45,
+    file.path("/ws/gcb/MZ/Humanized_mice_OD/Results",
+              paste0("DGE_EAE-NonSymp_vs_CFA_CD45_", bc, "_clusters.xlsx")),
+    overwrite = TRUE)
+  message("Saved ", bc, ".")
+}
+```
+
+PCA per tissue
+
+```{r}
+library(DESeq2); library(ggplot2); library(ggrepel); library(Matrix)
+for (bc in tissue) {
+obj <- clusters_objects[[bc]]
+DefaultAssay(obj) <- "RNA"
+obj <- JoinLayers(obj)
+cts <- GetAssayData(obj, assay = "RNA", layer = "counts")
+
+# sparse aggregation: genes x samples (avoids densifying 28k x 22k)
+g  <- factor(obj$sample)
+mm <- sparse.model.matrix(~ 0 + g); colnames(mm) <- levels(g)
+pb <- as.matrix(cts %*% mm)
+
+cd <- data.frame(
+  sample  = colnames(pb),
+  detail  = factor(sub("_.*$", "", colnames(pb))),   # CFA / EAE-NonSymp / EAE-Symp
+  row.names = colnames(pb)
+)
+cd$disease <- factor(ifelse(cd$detail == "CFA", "CFA", "EAE"), levels = c("CFA", "EAE"))
+
+dds <- DESeqDataSetFromMatrix(round(pb), cd, ~ disease)
+dds <- dds[rowSums(counts(dds)) >= 10, ]
+vsd <- vst(dds, blind = TRUE)          # blind = TRUE: ignore the design, honest QC
+
+p <- plotPCA(vsd, intgroup = "detail", returnData = TRUE)
+pv <- round(100 * attr(p, "percentVar"))
+
+p1<-ggplot(p, aes(PC1, PC2, colour = detail, label = name)) +
+  geom_point(size = 4) + geom_text_repel(size = 3, show.legend = FALSE) +
+  labs(x = paste0("PC1: ", pv[1], "% variance"),
+       y = paste0("PC2: ", pv[2], "% variance"), colour = NULL,
+       title = paste0(bc," pseudobulk, 7 animals")) +
+  coord_fixed() + theme_bw()
+print(p1)
+qc  <- data.frame(
+  depth   = colSums(pb)[p$name],
+  nGene   = colSums(pb > 0)[p$name],
+  PC1     = p$PC1
+)
+p2<-cor(qc$PC1, qc$depth); cor(qc$PC1, qc$nGene)
+print(p2)
+}
+```
+
+
+
+Per-tissue DGE within each cluster - the stratified version, 3 vs 3 animals in
+each tissue. This is the comparison to report when a cluster behaves
+differently in Brain, Meninges and Spleen.
+
+```{r}
+tissues <- levels(droplevels(factor(humanized_mouse_cd45$tissue)))
+
+dge_by_tissue <- list()
+for (tis in tissues) {
+  obj_tis <- subset(humanized_mouse_cd45, subset = tissue == tis)
+  for (cl in levels(droplevels(obj_tis$unintegrated_clusters))) {
+    key <- paste(tis, cl, sep = "_cluster")
+    message("Running DGE for ", key)
+    dge_by_tissue[[key]] <- run_pseudobulk_dge_cd45(
+      seurat_obj  = obj_tis,
+      cluster_col = "unintegrated_clusters",
+      cluster_id  = cl
+    )
+  }
+  rm(obj_tis); gc()
+}
+
+wb_tissue <- createWorkbook()
+for (key in names(dge_by_tissue)) {
+  if (!is.null(dge_by_tissue[[key]])) {
+    sheet_name <- substr(key, 1, 31)
+    addWorksheet(wb_tissue, sheet_name)
+    writeData(wb_tissue, sheet_name, dge_by_tissue[[key]])
+  }
+}
+saveWorkbook(wb_tissue,
+             "/date/gcb/gcb_MZ/Humanized_mice_OD/Results/DGE_EAE-NonSymp_vs_CFA_CD45_by_tissue.xlsx",
+             overwrite = TRUE)
+cat("Saved CD45 per-tissue DGE results.\n")
+```
+
+
+##7. The symptomatic animal, described rather than tested
+
+With n = 1 there is no valid test, but the animal is still informative. Two
+things can honestly be reported: how its cluster composition compares to the
+groups that do have replication, and the size of its expression shift for genes
+that were already identified in the replicated `EAE-NonSymp` vs `CFA` contrast.
+No p-values are produced here by design.
+
+```{r, fig.height=6, fig.width=12}
+prop <- humanized_mouse_cd45@meta.data %>%
+  count(animal, condition, tissue, unintegrated_clusters) %>%
+  group_by(animal, tissue) %>%
+  mutate(frac = n / sum(n)) %>%
+  ungroup()
+
+ggplot(prop, aes(x = unintegrated_clusters, y = frac, colour = condition)) +
+  geom_point(position = position_dodge(width = 0.6), size = 2) +
+  facet_wrap(~ tissue, ncol = 1) +
+  scale_y_continuous(labels = percent) +
+  labs(x = "Cluster", y = "Fraction of cells in library", colour = "Condition") +
+  theme_classic(base_size = 13)
+```
+
+Effect size for the symptomatic animal on the replicated hits: pseudobulk CPM
+per animal x tissue, so the symptomatic value can be read against the spread of
+the CFA and non-symptomatic animals.
+
+```{r}
+pseudobulk_cpm <- function(seurat_obj, cluster_col, cluster_id,
+                           min_cells_per_pb = 10) {
+  idx <- seurat_obj@meta.data[[cluster_col]] == cluster_id
+  if (sum(idx) < min_cells_per_pb) return(NULL)
+  sub_obj <- seurat_obj[, idx]
+  DefaultAssay(sub_obj) <- "RNA"
+  sub_obj <- JoinLayers(sub_obj)
+  cm   <- GetAssayData(sub_obj, assay = "RNA", layer = "counts")
+  meta <- sub_obj@meta.data
+  grp  <- paste(meta$animal, meta$tissue, sep = "__")
+  keep <- names(which(table(grp) >= min_cells_per_pb))
+  if (length(keep) == 0) return(NULL)
+  mat <- vapply(keep, function(g)
+    as.numeric(Matrix::rowSums(cm[, grp == g, drop = FALSE])),
+    numeric(nrow(cm)))
+  rownames(mat) <- rownames(cm)
+  cpm <- sweep(mat, 2, colSums(mat), "/") * 1e6
+  as.data.frame(cpm) %>%
+    mutate(gene = rownames(cpm)) %>%
+    pivot_longer(-gene, names_to = "group", values_to = "cpm") %>%
+    mutate(animal  = sub("__.*$", "", group),
+           tissue  = sub("^.*__", "", group),
+           cluster = as.character(cluster_id))
+}
+
+# Example: the top replicated hits of one cluster, with the symptomatic animal
+# shown alongside. Change `cl` to inspect other clusters.
+cl <- cluster_ids[1]
+if (!is.null(dge_cd45_list[[cl]])) {
+  top_genes <- head(dge_cd45_list[[cl]]$gene[
+    which(dge_cd45_list[[cl]]$padj < 0.05)], 12)
+
+  if (length(top_genes) > 0) {
+    cpm_long <- pseudobulk_cpm(humanized_mouse_cd45,
+                               "unintegrated_clusters", cl) %>%
+      filter(gene %in% top_genes) %>%
+      left_join(distinct(sample_sheet, animal, condition), by = "animal")
+
+    print(
+      ggplot(cpm_long, aes(x = condition, y = cpm, colour = condition)) +
+        geom_point(position = position_jitter(width = 0.15), size = 2) +
+        facet_wrap(~ gene, scales = "free_y") +
+        labs(x = NULL, y = "Pseudobulk CPM",
+             title = paste("Cluster", cl,
+                           "- replicated hits, all animals shown")) +
+        theme_classic(base_size = 12) +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1),
+              legend.position = "none")
+    )
+  }
+}
+```
+
+##8. Session info
+
+```{r}
+sessionInfo()
+```

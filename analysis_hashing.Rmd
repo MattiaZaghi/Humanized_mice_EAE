@@ -77,6 +77,7 @@ library(pheatmap)
 library(DESeq2)
 library(ggrepel)
 library(yaml)
+library(clustree)
 opts_knit$set(root.dir = "/ws/gcb/MZ/Humanized_mice_OD/hashing/") # change accordingly
 ```
 
@@ -1081,6 +1082,33 @@ humanized_mouse_hashing <- RunUMAP(humanized_mouse_hashing, dims = 1:n_dims,
                                    reduction.name = "umap.unintegrated")
 ```
 
+```{r resolution-sweep, cache = TRUE, cache.lazy = FALSE}
+res_grid <- c( 0.5, 0.8, 1.0, 1.2, 1.5, 2.0)
+
+## FindClusters takes a vector and writes one column per resolution,
+## named <graph.name>_res.<r>.
+humanized_mouse_hashing <- FindClusters(
+  humanized_mouse_hashing,
+  graph.name = "SCT_snn",
+  resolution = res_grid,
+  verbose    = FALSE
+)
+
+res_cols <- paste0("SCT_snn_res.", res_grid)
+stopifnot(all(res_cols %in% colnames(humanized_mouse_hashing@meta.data)))
+
+clustree(humanized_mouse_hashing, prefix = "SCT_snn_res.") +
+  ggtitle("Cluster tree across resolution")
+```
+
+
+```{r}
+humanized_mouse_hashing$seurat_clusters <-
+  humanized_mouse_hashing$unintegrated_clusters
+Idents(humanized_mouse_hashing) <- "unintegrated_clusters"
+```
+
+
 ```{r, fig.height=12, fig.width=18}
 my_colors <- as.vector(pals::polychrome(36))
 
@@ -1128,16 +1156,98 @@ comp("region", "Region") / comp("animal", "Animal") /
 
 Cluster markers.
 
-```{r}
-DefaultAssay(humanized_mouse_hashing) <- "SCT"
-humanized_mouse_hashing <- PrepSCTFindMarkers(humanized_mouse_hashing)
-hashing_markers <- FindAllMarkers(humanized_mouse_hashing, only.pos = TRUE)
+### Markers at every resolution
 
-write.xlsx(hashing_markers,
-           file.path(markers_dir, "hashing_global_markers.xlsx"),
-           overwrite = TRUE)
-hashing_markers %>% group_by(cluster) %>% slice_max(avg_log2FC, n = 10)
+`pct.1 > 0.25` is enforced explicitly rather than left to `min.pct`, which
+filters on *either* population. `spec = pct.1 - pct.2` is the specificity
+ranking; `avg_log2FC` is unstable at low detection and is not used to rank.
+
+```{r resolution-markers, cache = TRUE, cache.lazy = FALSE}
+## Animals eligible for pseudobulk DE (EAE-Symp reserved, reps pooled per animal).
+## base::setdiff is namespace-qualified: BiocGenerics masks setdiff, intersect,
+## union and several dplyr verbs because DESeq2 is loaded after tidyverse.
+all_animals  <- as.character(unique(humanized_mouse_hashing$animal))
+test_animals <- base::setdiff(all_animals,
+                              grep("^EAE-Symp", all_animals, value = TRUE))
+stopifnot(length(test_animals) > 0)
+
+marker_sheets <- list()
+sweep_stats   <- list()
+
+for (i in seq_along(res_grid)) {
+  r  <- res_grid[i]
+  cl <- humanized_mouse_hashing@meta.data[[res_cols[i]]]
+  Idents(humanized_mouse_hashing) <- cl
+
+  mk <- FindAllMarkers(humanized_mouse_hashing, only.pos = TRUE,
+                       min.pct = 0.25, logfc.threshold = 0.25,
+                       verbose = FALSE)
+
+  ## Filter and sort in base R. Every dplyr verb used here (filter, mutate,
+  ## arrange, desc, count, slice) is masked by one of the Bioconductor packages
+  ## in the setup chunk, so the pipe silently dispatched to an S4 method.
+  mk <- mk[mk$p_val_adj < 0.05 & mk$pct.1 > 0.25, , drop = FALSE]
+  mk$spec       <- mk$pct.1 - mk$pct.2
+  mk$resolution <- r
+  mk <- mk[order(mk$cluster, -mk$spec), , drop = FALSE]
+
+  marker_sheets[[paste0("res_", r)]] <- mk
+
+  ## A cluster "earns its place" with >=3 genes at pct.1 > 0.40 & pct.2 < 0.20.
+  ## pct.2 is lenient on purpose: residual ambient inflates it uniformly, so a
+  ## clean-dataset ceiling of 0.10 would reject genuine populations here.
+  spec_hits <- mk[mk$pct.1 > 0.40 & mk$pct.2 < 0.20, , drop = FALSE]
+  earned <- if (nrow(spec_hits) == 0L) 0L else
+    sum(table(as.character(spec_hits$cluster)) >= 3)
+
+  tab  <- table(as.character(cl),
+                as.character(humanized_mouse_hashing$animal))
+  stopifnot(all(test_animals %in% colnames(tab)))
+  tab  <- tab[, test_animals, drop = FALSE]
+  ok   <- apply(tab, 1, function(v) all(v >= 20))
+  n_cl <- length(unique(cl))
+
+  sweep_stats[[i]] <- data.frame(
+    resolution                = r,
+    n_clusters                = n_cl,
+    pct_with_specific_markers = round(100 * earned / n_cl, 1),
+    n_DE_viable               = sum(ok),
+    pct_cells_in_DE_viable    = round(100 * sum(rowSums(tab)[ok]) / sum(tab), 1),
+    median_cluster_size       = median(as.numeric(table(cl))),
+    min_cluster_size          = min(as.numeric(table(cl)))
+  )
+}
+
+sweep_stats <- do.call(rbind, sweep_stats)
+Idents(humanized_mouse_hashing) <- "unintegrated_clusters"
+sweep_stats
 ```
+
+One workbook, a summary sheet followed by one sheet per resolution.
+
+```{r}
+wb <- createWorkbook()
+addWorksheet(wb, "summary")
+writeData(wb, "summary", sweep_stats)
+for (nm in names(marker_sheets)) {
+  addWorksheet(wb, nm)                    # "res_0.5" etc., well under the 31-char cap
+  writeData(wb, nm, marker_sheets[[nm]])
+}
+saveWorkbook(wb, file.path(markers_dir, "hashing_markers_by_resolution.xlsx"),
+             overwrite = TRUE)
+
+## Persist the clusterings themselves so annotation can move between resolutions
+## without rerunning the sweep.
+wb <- createWorkbook()
+addWorksheet(wb, "hashing")
+cluster_tab <- humanized_mouse_hashing@meta.data[, res_cols, drop = FALSE]
+cluster_tab <- data.frame(cell = rownames(cluster_tab), cluster_tab,
+                          check.names = FALSE)
+writeData(wb, "hashing", cluster_tab)
+saveWorkbook(wb, file.path(res_dir, "hashing_clusters_by_resolution.xlsx"),
+             overwrite = TRUE)
+```
+
 
 Because these are whole-brain nuclei from the same model as the already-annotated
 object built in `analysis.Rmd`, the labels there are a legitimate starting point
